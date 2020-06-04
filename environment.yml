@@ -10,6 +10,14 @@ dependencies:
   - conda-forge::markdown=3.1.1
   - conda-forge::pymdown-extensions=6.0
   - conda-forge::pygments=2.5.2
-  # TODO nf-core: Add required software dependencies here
-  - bioconda::fastqc=0.11.8
-  - bioconda::multiqc=1.7
+  - cnvnator=0.3.3
+  - multiqc=1.9.0
+  - fastqc=0.11.8
+  - bwa=0.7.17
+  - picard=2.18.7
+  - gatk=3.8
+  - samtools=1.10
+  - bcftools=1.10.2
+  - tabix=0.2.6
+  - bioconductor-variantannotation=1.32.0
+  - bioconductor-rtracklayer=1.46.0

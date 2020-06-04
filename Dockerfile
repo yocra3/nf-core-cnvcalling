@@ -11,3 +11,12 @@ ENV PATH /opt/conda/envs/nf-core-cnvcalling-1.0dev/bin:$PATH
 
 # Dump the details of the installed packages to a file for posterity
 RUN conda env export --name nf-core-cnvcalling-1.0dev > nf-core-cnvcalling-1.0dev.yml
+
+## TCAG pipeline
+RUN cd ~ && git clone https://github.com/bjtrost/TCAG-WGS-CNV-workflow.git 
+
+## ERDS
+RUN cd ~ && git clone https://github.com/igm-team/ERDS.git && \
+    cd ERDS/erds_tcag/src && make
+ENV PATH /root/ERDS/erds_tcag/src/:$PATH
+
