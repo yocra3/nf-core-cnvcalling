@@ -100,23 +100,63 @@ ch_output_docs = file("$baseDir/docs/output.md", checkIfExists: true)
 if (params.readPaths) {
     if (params.single_end) {
         Channel
-            .from(params.readPaths)
-            .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true) ] ] }
+            .fromPath(params.readPaths)
+            .splitCsv(sep: "\t")
+            .map { row -> [ row[0], [ file(row[1], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_trimming }
+            .into { ch_read_files_fastqc; ch_read_files_alignment }
     } else {
         Channel
-            .from(params.readPaths)
-            .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true), file(row[1][1], checkIfExists: true) ] ] }
+            .value(file("${params.readPaths}").text)
+            .splitCsv(sep: "\t")
+            .map { row -> [ row[0], [ file(row[1], checkIfExists: true), file(row[2], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_trimming }
+            .into { ch_read_files_fastqc; ch_read_files_alignment }
     }
 } else {
     Channel
         .fromFilePairs(params.reads, size: params.single_end ? 1 : 2)
         .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --single_end on the command line." }
-        .into { ch_read_files_fastqc; ch_read_files_trimming }
+        .into { ch_read_files_fastqc; ch_read_files_alignment }
 }
+
+
+if (params.fasta && !params.skipAlignment) {
+  if (hasExtension(params.fasta, 'gz')) {
+    Channel.fromPath(params.fasta, checkIfExists: true)
+        .ifEmpty { exit 1, "Genome fasta file not found: ${params.fasta}" }
+        .set { genome_fasta_gz }
+  } else {
+      Channel.fromPath(params.fasta, checkIfExists: true)
+        .ifEmpty { exit 1, "Genome fasta file not found: ${params.fasta}" }
+        .into { ch_fasta_for_bwa_index; ch_fasta_for_gatk; ch_fasta_for_cnvnator }
+  }
+}
+
+if (params.varsRef) {
+  Channel.from(params.varsRef)
+    .map { path -> [ file(path, checkIfExists: true), file("${path}.tbi", checkIfExists: true) ] }
+    .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
+    .set { ch_vars_ref }
+}
+
+/*
+* Convert parameters with strings to files
+*/
+params.gapsRef = "/home/SHARED/DATA/REFERENCES/GRCh37/Repeats/RLCRs_no_Repeat_Masker.txt"
+
+
+
+fastaRef = file("${params.fastaRef}")
+varsRefexome = file("${params.varsRefexome}")
+varsRefexomeidx = file("${params.varsRefexome}.tbi")
+varsRefgenome = file("${params.varsRefgenome}")
+varsRefgenomeidx = file("${params.varsRefgenome}.tbi")
+gapsRef = file("${params.gapsRef}")
+
+params.binSize = 100
+params.genome = "hg19"
+
 
 // Header log info
 log.info nfcoreHeader()
@@ -170,6 +210,34 @@ Channel.from(summary.collect{ [it.key, it.value] })
     """.stripIndent() }
     .set { ch_workflow_summary }
 
+compressedReference = hasExtension(params.fasta, 'gz')
+
+if (compressedReference) {
+  // TODO nf-core: Simplificar parametros
+
+  // This complex logic is to prevent accessing the genome_fasta_gz variable if
+  // necessary indices for STAR, HiSAT2, Salmon already exist, or if
+  // params.transcript_fasta is provided as then the transcript sequences don't
+  // need to be extracted.
+  process gunzip_genome_fasta {
+    tag "$gz"
+    publishDir path: { params.saveReference ? "${params.outdir}/reference_genome" : params.outdir },
+    saveAs: { params.saveReference ? it : null }, mode: 'copy'
+
+    input:
+    file gz from genome_fasta_gz
+
+    output:
+    file "${gz.baseName}" into ch_fasta_for_bwa_index, ch_fasta_for_gatk, ch_fasta_for_cnvnator
+
+    script:
+    """
+    gunzip -k --verbose --stdout --force ${gz} > ${gz.baseName}
+    """
+  }
+}
+
+
 /*
  * Parse software version numbers
  */
@@ -196,6 +264,61 @@ process get_software_versions {
 }
 
 /*
+ * Pre-process: prepare BWA index
+ */
+process make_BWA_index {
+
+    input:
+    file fasta from ch_fasta_for_bwa_index
+
+    output:
+    file "bwa.ind*" into bwa_index
+
+    script:
+    """
+    bwa index $fasta -p bwa.ind
+    """
+}
+
+/*
+ * Pre-process: Create fasta dictionary
+ */
+ process createFastaDict {
+
+   input:
+   file("ref.fasta") from ch_fasta_for_gatk
+
+   output:
+   set file("ref.fasta"), file("ref.fasta.fai"), file("ref.dict") into ch_fastadict_CIGAR, ch_fastadict_recalibrate, ch_fastadict_BSQR, ch_fastadict_HaploCall, ch_fastadict_genotype, ch_fastadict_callsFilter, ch_fasta_for_ERDS
+
+   """
+   samtools faidx ref.fasta
+   gatk CreateSequenceDictionary -R ref.fasta
+   """
+ }
+
+ /*
+  * Pre-process:  Split fasta in chromosomes
+  */
+ process splitFasta {
+
+   input:
+   file(fasta) from ch_fasta_for_cnvnator
+
+   output:
+   file("*.fa") into ch_fastaChr_cnvnator
+
+   """
+   csplit -s -z $fasta '/>/' '{*}'
+   for i in xx*
+   do
+     n=\$(sed 's/>// ; s/ .*// ; 1q' "\$i") ; \
+     mv "\$i" "\$n.fa" ; \
+   done
+   """
+ }
+
+/*
  * STEP 1 - FastQC
  */
 process fastqc {
@@ -217,6 +340,464 @@ process fastqc {
     fastqc --quiet --threads $task.cpus $reads
     """
 }
+
+
+/*
+ * STEP 2 - Align with BWA
+ */
+ process align_BWA {
+    tag "$name"
+    label 'process_long'
+
+    input:
+    set val(name), file(reads) from ch_read_files_alignment
+    file (bwaIndex) from bwa_index.collect()
+
+    output:
+    set val(name), file ("${name}.bam") into alignments
+
+    script:
+    """
+    bwa mem bwa.ind $reads -t 8 | samtools view -S -b - > ${name}.bam
+    """
+}
+
+
+/*
+ * STEP 2a - Add read group to bam
+ */
+process correctBam {
+  tag "$name"
+
+  label 'process_long'
+
+  input:
+  set val(name), file (bam) from alignments
+
+
+  output:
+  set val(name), file("sort.bam") into sortbams
+
+  """
+  picard AddOrReplaceReadGroups \
+        I=$bam \
+        O=sort.bam \
+        RGID=1 \
+        RGLB=HW5CWBBXX \
+        RGPL=ILLUMINA \
+        RGPU=K00171 \
+        RGSM=$name \
+	SORT_ORDER=coordinate
+    """
+}
+
+/*
+ * STEP 2b - Mark duplicate reads
+ */
+process markDuplicates {
+  tag "$name"
+
+  label 'process_long'
+
+  input:
+  set val(name), file(bam) from sortbams
+
+  output:
+  set val(name), file("dups.bam") into dupbams
+
+  """
+  picard MarkDuplicates \
+  I=$bam \
+  O=dups.bam \
+  M=dup_metrics.txt
+  """
+}
+
+/*
+* STEP 2c -  Recalibrate base score
+*/
+process recalibrateBase {
+  tag "$name"
+
+  label 'process_long'
+
+  input:
+  set val(name), file(bam) from dupbams
+  set file(vars_ref), file(vars_ref_idx) from ch_vars_ref.collect()
+  set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_recalibrate.collect()
+
+  output:
+  set val(name), file(bam), file("recal_data.table") into recalTable
+
+  """
+  gatk BaseRecalibrator \
+   -I $bam \
+   -R $fasta \
+   --known-sites $vars_ref \
+   -O recal_data.table
+  """
+}
+
+/*
+* STEP 2d -  Apply recalibration from recalibrateBase
+*/
+process applyRecalibration {
+  tag "$name"
+
+  label 'process_long'
+
+  publishDir "${params.outdir}/alignments", mode: 'copy'
+
+  input:
+  set val(name), file(bam), file(baseTable) from recalTable
+  set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_BSQR.collect()
+
+
+  output:
+  set val(name), file("${name}_genetic.bam"), file("${name}_genetic.bai") into calBams, ch_bams_cnvnator, ch_bams_erds
+
+  """
+  gatk ApplyBQSR \
+    -R $fasta \
+    -I $bam \
+    --bqsr-recal-file $baseTable \
+    -O ${name}_genetic.bam
+  """
+
+}
+
+
+/*
+ * STEP 3 - Perform germline variant calling
+ */
+
+ /*
+ * STEP 3a -Prepare gVCFs
+ */
+ process callHaplotype {
+   tag "$name"
+
+   label 'process_long'
+
+   input:
+   set val(name), file(bam), file(bai) from calBams
+   set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_HaploCall.collect()
+
+
+   output:
+   set val(name), file("output.g.vcf.gz") into ch_vcf_ini
+
+   """
+   gatk --java-options "-Xmx16g" HaplotypeCaller  \
+      -R $fasta \
+      -I $bam \
+      -O output.g.vcf.gz \
+      -ERC GVCF
+   """
+
+ }
+
+ /*
+  * STEP 3b - Index VCFs
+  */
+ process indexVCFs {
+   tag "$name"
+
+   input:
+   set val(name), file("g.vcf.gz") from ch_vcf_ini
+
+   output:
+   set val(name), file("g.vcf.gz"), file("g.vcf.gz.tbi") into ch_vcf_idx
+
+   """
+   tabix -p vcf g.vcf.gz
+   """
+ }
+
+
+ /*
+  * STEP 3c - Prepare DB of VCFs
+  */
+ process createMapFile {
+   tag "$name"
+
+   input:
+   set val(name), file("${name}.vcf.gz"), file("${name}.vcf.gz.tbi") from ch_vcf_idx
+
+   output:
+   set file("${name}.vcf.gz"), file("${name}.vcf.gz.tbi") into ch_vcfs
+   file("${name}.map") into ch_map
+
+   """
+   echo "$name\t${name}.vcf.gz" > ${name}.map
+   """
+ }
+
+ /*
+  * STEP 3d - Prepare DB of VCFs
+  */
+ process makeGenomicsDB {
+
+   input:
+   file(map) from ch_map.collect()
+   file(vcf) from ch_vcfs.collect()
+
+   output:
+   file("my_database/") into ch_vcfs_db
+
+   """
+   for f in *.map
+   do
+    cat \$f >> sample_map.txt
+  done
+
+  ## Create intervals list file
+  for ch in `seq 1 1 22`
+  do
+    echo \$ch >> intervals.list
+  done
+  echo X >> intervals.list
+  echo Y >> intervals.list
+
+   gatk --java-options "-Xmx4g -Xms4g" \
+        GenomicsDBImport \
+        --genomicsdb-workspace-path my_database \
+        --batch-size 50 \
+        -L intervals.list \
+        --sample-name-map sample_map.txt \
+        --reader-threads 5
+   """
+ }
+
+ /*
+  * STEP 3e - Perform joint genotyping
+  */
+ process genotypeGVCF {
+
+   input:
+   file(db) from ch_vcfs_db
+   set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_genotype.collect()
+
+   output:
+   set file("allSamples_genomic.vcf.gz"), file("allSamples_genomic.vcf.gz.tbi") into ch_comb_vcf
+
+   """
+   mkdir tmp
+   gatk --java-options "-Xmx4g" GenotypeGVCFs \
+     -R $fasta \
+     -V gendb://my_database \
+     -O allSamples_genomic.vcf.gz \
+     --tmp-dir ./tmp
+   """
+ }
+
+ /*
+  * STEP 3f - Hard filtering of variants (Apply thresholds recommended for RNAseq)
+  */
+ process filterVariants {
+
+   publishDir "${params.outdir}/VariantCalling", mode: 'copy'
+
+
+   input:
+   set file(vcf), file(vcf_idx) from ch_comb_vcf
+   set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_callsFilter.collect()
+
+   output:
+   set file("allSamples_genomic_filtered.vcf.gz"), file("allSamples_genomic.vcf.gz.tbi") into ch_filt_vcf
+
+   """
+   gatk --java-options "-Xmx4g" VariantFiltration \
+     -R $fasta \
+     -V ${vcf} \
+     --window 35 \
+     --cluster 3 \
+     --filter-name "FS" \
+     --filter "FS > 30.0" \
+     --filter-name "QD" \
+     --filter "QD < 2.0" \
+     -O allSamples_genomic_filtered.vcf.gz
+   """
+ }
+
+ /*
+  * STEP 4 - CNV calling with CNVnator
+  */
+  process runCNVnator {
+    tag "$sampID"
+
+    label 'process_medium'
+
+    input:
+    set sampID, file(bam), file(bai) from ch_bams_cnvnator
+    file(fasta) from ch_fastaChr_cnvnator.collect()
+    val(genome) from params.genome
+    val(bin_size) from params.binSize
+
+    output:
+    set sampID, file("${sampID}.txt") into ch_cnvnator_calls
+
+    """
+    cnvnator -genome $genome -root ${sampID}.root -tree $bam
+    cnvnator -genome $genome -root ${sampID}.root -his $bin_size
+    cnvnator -root "${sampID}.root" -stat $bin_size
+    cnvnator -root "${sampID}.root" -partition $bin_size -ngc
+    cnvnator -root "${sampID}.root" -call $bin_size -ngc > ${sampID}.txt
+    """
+
+  }
+
+  /*
+  * STEP 4b - Format CNVnator
+  */
+  process formatCNVNnator {
+    tag "$sampID"
+
+    input:
+    set sampID, file("${sampID}.cnvnator.txt") from ch_cnvnator_calls
+
+    output:
+    set sampID, file("out/${sampID}.cnvnator.txt") into ch_cnvnator_formatcalls
+
+    """
+    mkdir out
+    python2 ~/TCAG-WGS-CNV-workflow/format_cnvnator_results.py ${sampID}.cnvnator.txt out/${sampID}.cnvnator.txt
+    """
+
+  }
+
+
+  /*
+  * STEP 4c - Cluster CNVnator calls
+  */
+  process clusterCNVnator {
+
+    label 'process_low'
+
+    input:
+    set sampID, file(cnvnatorCall) from ch_cnvnator_formatcalls
+    file(gapsRef) from gapsRef
+
+    output:
+    set sampID, file("merged/${sampID}.cnvnator.txt.cluster.txt") into ch_cnvnator_clustercalls
+
+    """
+    mkdir calls
+
+    echo $cnvnatorCall"\t"$sampID > ids.map
+    grep -v "GL" $cnvnatorCall > calls/$cnvnatorCall
+
+    mkdir merged
+    python2 ~/TCAG-WGS-CNV-workflow/merge_cnvnator_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
+    """
+
+  }
+
+  /*
+   * STEP 5 - CNV calling with ERDS
+   */
+   process runERDS {
+     tag "$sampID"
+
+     label 'process_medium'
+
+     input:
+     set sampID, file(bam), file(bai) from ch_bams_erds
+     file(fasta) from ch_fasta_for_ERDS
+     set file(vcf), file(vcf_idx) from ch_comb_vcf.collect()
+
+     output:
+     set sampID, file("${sampID}/${sampID}.erds.vcf") into ch_ERDS_calls
+
+     """
+     erds_pipeline.pl -b $bam -v $vcf -o ./$sampID -r $fasta --name $sampID --samtools /opt/conda/envs/nf-core-cnvcalling-1.0dev/bin/samtools
+     """
+
+   }
+
+   /*
+   * STEP 5b - Format ERDS
+   */
+   process formatERDS {
+     tag "$sampID"
+
+     input:
+     set sampID, file("erds.vcf") from ch_ERDS_calls
+
+     output:
+     set sampID, file("${sampID}.erds.txt") into ch_ERDS_formatted_calls
+     """
+     python2 ~/TCAG-WGS-CNV-workflow/format_erds_results.py erds.vcf ${sampID}.erds.txt
+     """
+
+   }
+
+   /*
+   * STEP 5c - Cluster ERDS calls
+   */
+   process clusterERDS {
+     tag "$sampID"
+
+     input:
+     set sampID, file(erdsCall) from ch_ERDS_formatted_calls
+     file(gapsRef) from gapsRef
+
+     output:
+     set sampID, file("merged/${sampID}.erds.txt.cluster.txt") into ch_erds_clustercalls
+
+     """
+     mkdir calls
+
+     echo $erdsCall"\t"$sampID > ids.map
+     grep -v "GL" $erdsCall > calls/$erdsCall
+
+
+     mkdir merged
+     python2 ~/TCAG-WGS-CNV-workflow/merge_erds_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
+     """
+   }
+
+ch_combined_calls = ch_cnvnator_clustercalls.join(ch_erds_clustercalls)
+
+/*
+* STEP 5d - Combine CNVnator and ERDS calls
+*/
+process combineCalls {
+  tag "$sampID"
+
+  input:
+  set sampID, file(cnvnatorCall), file(erdsCall) from ch_combined_calls
+
+  output:
+  set sampID, file("${sampID}_cnvnator_erds_combinedCNVs.txt") into ch_final_calls
+
+  """
+  python2 ~/TCAG-WGS-CNV-workflow/add_features.py -i $cnvnatorCall -a $erdsCall -o ${sampID}_cnvnator_erds_combinedCNVs.txt -s $sampID -c 0 -p reciprocal
+  """
+}
+
+
+/*
+* STEP 5e - Filter CNV calls
+* - Select common CNVs between CNVnator and erds (reciprocal overlap > 50%)
+* - Discard CNVs with CNVnator q0 > 0.5
+* - Remove CNVs overlapping > 70% with low complexity regions
+*/
+process filterCalls {
+  tag "$sampID"
+
+  input:
+  set sampID, file(combCall) from ch_final_calls
+  file(gapsRef) from gapsRef
+
+  output:
+  set sampID, file("${sampID}_cnvnator_erds_filteredCNVs.txt") into filtered_calls
+
+  """
+  filterCNVs.R $combCall $gapsRef ${sampID}_cnvnator_erds_filteredCNVs.txt
+  """
+}
+
 
 /*
  * STEP 2 - MultiQC
@@ -251,6 +832,7 @@ process multiqc {
  * STEP 3 - Output Description HTML
  */
 process output_documentation {
+
     publishDir "${params.outdir}/pipeline_info", mode: 'copy'
 
     input:
@@ -423,4 +1005,9 @@ def checkHostname() {
             }
         }
     }
+}
+
+// Check file extension
+def hasExtension(it, extension) {
+    it.toString().toLowerCase().endsWith(extension.toLowerCase())
 }
