@@ -1,0 +1,26 @@
+FROM nfcore/base:1.12.1
+LABEL authors="Carlos Ruiz-Arenas" \
+      description="Docker image containing all software requirements for the nf-core/cnvcalling pipeline"
+
+# Install dependencies for MrMosaic before using conda
+## MrMosaic is not in conda and cannot be installed inside conda environments
+RUN apt-get update --fix-missing && \
+  apt-get install -q -y libncurses5-dev libncursesw5-dev zlib1g-dev gcc make \
+  r-base r-base-dev libcurl4-openssl-dev libssl-dev libgit2-dev libxml2-dev
+
+
+# MrMosaic
+## Install required R packages
+RUN R -e 'install.packages(c("devtools","argparse","yaml","zoo"))'
+RUN R -e 'install.packages("gada", repos="http://R-Forge.R-project.org")'
+#RUN R -e 'devtools::install_github("asifrim/mrmosaic",ref="master",subdir="mrmosaic")'
+
+# R packages
+RUN cd ~ && git clone https://github.com/asifrim/mrmosaic.git && \
+        cd mrmosaic && mv mrmosaic/R/plot_* mrmosaic/scripts/ && \
+        make cnv_baf_data && R -e 'install.packages("mrmosaic", repos=NULL, type="source")' && \
+        sed -i "1s/.*/#!\/usr\/bin\/Rscript/" mrmosaic/scripts/run_mrmosaic.sh ## Change Rscript location
+
+
+# setup aliases
+ENV PATH $PATH:~/mrmosaic/bin/:~/mrmosaic/mrmosaic/scripts/

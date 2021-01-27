@@ -56,22 +56,6 @@ if (params.help) {
  * SET UP CONFIGURATION VARIABLES
  */
 
-// Check if genome exists in the config file
-if (params.genomes && params.genome && !params.genomes.containsKey(params.genome)) {
-    exit 1, "The provided genome '${params.genome}' is not available in the iGenomes file. Currently the available genomes are ${params.genomes.keySet().join(", ")}"
-}
-
-// TODO nf-core: Add any reference files that are needed
-// Configurable reference genomes
-//
-// NOTE - THIS IS NOT USED IN THIS PIPELINE, EXAMPLE ONLY
-// If you want to use the channel below in a process, define the following:
-//   input:
-//   file fasta from ch_fasta
-//
-params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
-if (params.fasta) { ch_fasta = file(params.fasta, checkIfExists: true) }
-
 // Has the run name been specified by the user?
 //  this has the bonus effect of catching both -name and --name
 custom_runName = params.name
@@ -90,36 +74,20 @@ if (workflow.profile.contains('awsbatch')) {
 }
 
 // Stage config files
-ch_multiqc_config = file("$baseDir/assets/multiqc_config.yaml", checkIfExists: true)
-ch_multiqc_custom_config = params.multiqc_config ? Channel.fromPath(params.multiqc_config, checkIfExists: true) : Channel.empty()
 ch_output_docs = file("$baseDir/docs/output.md", checkIfExists: true)
 
 /*
  * Create a channel for input read files
  */
-if (params.readPaths) {
-    if (params.single_end) {
-        Channel
-            .fromPath(params.readPaths)
+if (params.inputTable) {
+      Channel
+            .fromPath(params.inputTable)
             .splitCsv(sep: "\t")
-            .map { row -> [ row[0], [ file(row[1], checkIfExists: true) ] ] }
-            .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_alignment }
-    } else {
-        Channel
-            .value(file("${params.readPaths}").text)
-            .splitCsv(sep: "\t")
-            .map { row -> [ row[0], [ file(row[1], checkIfExists: true), file(row[2], checkIfExists: true) ] ] }
-            .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_alignment }
-    }
-} else {
-    Channel
-        .fromFilePairs(params.reads, size: params.single_end ? 1 : 2)
-        .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --single_end on the command line." }
-        .into { ch_read_files_fastqc; ch_read_files_alignment }
-}
-
+            .map { row -> [ row[0], file(row[1], checkIfExists: true), file(row[1] + ".bai", checkIfExists: true) ,
+             file(row[2], checkIfExists: true),  file(row[2] + ".tbi", checkIfExists: true) ]  }
+            .ifEmpty { exit 1, "params.inputTable was empty - no input files supplied" }
+            .into { ch_input_cnvnator; ch_input_erds; ch_input_mosaichunter; ch_input_indels; ch_input_mrmosaic }
+} else { exit 1, "--inputTable should be text file with the sample id, a bam file and a vcf file should be provided." }
 
 if (params.fasta && !params.skipAlignment) {
   if (hasExtension(params.fasta, 'gz')) {
@@ -129,87 +97,83 @@ if (params.fasta && !params.skipAlignment) {
   } else {
       Channel.fromPath(params.fasta, checkIfExists: true)
         .ifEmpty { exit 1, "Genome fasta file not found: ${params.fasta}" }
-        .into { ch_fasta_for_bwa_index; ch_fasta_for_gatk; ch_fasta_for_cnvnator }
+        .into { ch_fasta_for_dict; ch_fasta_for_cnvnator; ch_fasta_for_mosaichunter }
   }
 }
 
-if (params.varsRef) {
-  Channel.from(params.varsRef)
-    .map { path -> [ file(path, checkIfExists: true), file("${path}.tbi", checkIfExists: true) ] }
-    .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-    .set { ch_vars_ref }
-}
+
+
 
 /*
-* Convert parameters with strings to files
+* Initialize parameters
 */
+date = java.time.LocalDate.now()
 params.gapsRef = "/home/SHARED/DATA/REFERENCES/GRCh37/Repeats/RLCRs_no_Repeat_Masker.txt"
-
-
-
-fastaRef = file("${params.fastaRef}")
-varsRefexome = file("${params.varsRefexome}")
-varsRefexomeidx = file("${params.varsRefexome}.tbi")
-varsRefgenome = file("${params.varsRefgenome}")
-varsRefgenomeidx = file("${params.varsRefgenome}.tbi")
 gapsRef = file("${params.gapsRef}")
-
 params.binSize = 100
 params.genome = "hg19"
+commonCNV = file("${params.commonCNV}")
+clinvarCNV = file("${params.clinvarCNV}")
+gtfRef = file("${params.gtfRef}")
+omim = file("${params.omim}")
+annovar = file("${params.annovarPath}/table_annovar.pl")
+annovarVar = file("${params.annovarPath}/annotate_variation.pl")
+annovarCod = file("${params.annovarPath}/coding_change.pl")
+annovarFold = file("${params.annovarFold}")
 
-
-// Header log info
-log.info nfcoreHeader()
-def summary = [:]
-if (workflow.revision) summary['Pipeline Release'] = workflow.revision
-summary['Run Name']         = custom_runName ?: workflow.runName
-// TODO nf-core: Report custom parameters here
-summary['Reads']            = params.reads
-summary['Fasta Ref']        = params.fasta
-summary['Data Type']        = params.single_end ? 'Single-End' : 'Paired-End'
-summary['Max Resources']    = "$params.max_memory memory, $params.max_cpus cpus, $params.max_time time per job"
-if (workflow.containerEngine) summary['Container'] = "$workflow.containerEngine - $workflow.container"
-summary['Output dir']       = params.outdir
-summary['Launch dir']       = workflow.launchDir
-summary['Working dir']      = workflow.workDir
-summary['Script dir']       = workflow.projectDir
-summary['User']             = workflow.userName
-if (workflow.profile.contains('awsbatch')) {
-    summary['AWS Region']   = params.awsregion
-    summary['AWS Queue']    = params.awsqueue
-    summary['AWS CLI']      = params.awscli
-}
-summary['Config Profile'] = workflow.profile
-if (params.config_profile_description) summary['Config Description'] = params.config_profile_description
-if (params.config_profile_contact)     summary['Config Contact']     = params.config_profile_contact
-if (params.config_profile_url)         summary['Config URL']         = params.config_profile_url
-if (params.email || params.email_on_fail) {
-    summary['E-mail Address']    = params.email
-    summary['E-mail on failure'] = params.email_on_fail
-    summary['MultiQC maxsize']   = params.max_multiqc_email_size
-}
-log.info summary.collect { k,v -> "${k.padRight(18)}: $v" }.join("\n")
-log.info "-\033[2m--------------------------------------------------\033[0m-"
-
-// Check the hostnames against configured profiles
-checkHostname()
-
-Channel.from(summary.collect{ [it.key, it.value] })
-    .map { k,v -> "<dt>$k</dt><dd><samp>${v ?: '<span style=\"color:#999999;\">N/A</a>'}</samp></dd>" }
-    .reduce { a, b -> return [a, b].join("\n            ") }
-    .map { x -> """
-    id: 'nf-core-cnvcalling-summary'
-    description: " - this information is collected when the pipeline is started."
-    section_name: 'nf-core/cnvcalling Workflow Summary'
-    section_href: 'https://github.com/nf-core/cnvcalling'
-    plot_type: 'html'
-    data: |
-        <dl class=\"dl-horizontal\">
-            $x
-        </dl>
-    """.stripIndent() }
-    .set { ch_workflow_summary }
-
+//
+// // Header log info
+// log.info nfcoreHeader()
+// def summary = [:]
+// if (workflow.revision) summary['Pipeline Release'] = workflow.revision
+// summary['Run Name']         = custom_runName ?: workflow.runName
+// // TODO nf-core: Report custom parameters here
+// summary['Reads']            = params.reads
+// summary['Fasta Ref']        = params.fasta
+// summary['Data Type']        = params.single_end ? 'Single-End' : 'Paired-End'
+// summary['Max Resources']    = "$params.max_memory memory, $params.max_cpus cpus, $params.max_time time per job"
+// if (workflow.containerEngine) summary['Container'] = "$workflow.containerEngine - $workflow.container"
+// summary['Output dir']       = params.outdir
+// summary['Launch dir']       = workflow.launchDir
+// summary['Working dir']      = workflow.workDir
+// summary['Script dir']       = workflow.projectDir
+// summary['User']             = workflow.userName
+// if (workflow.profile.contains('awsbatch')) {
+//     summary['AWS Region']   = params.awsregion
+//     summary['AWS Queue']    = params.awsqueue
+//     summary['AWS CLI']      = params.awscli
+// }
+// summary['Config Profile'] = workflow.profile
+// if (params.config_profile_description) summary['Config Description'] = params.config_profile_description
+// if (params.config_profile_contact)     summary['Config Contact']     = params.config_profile_contact
+// if (params.config_profile_url)         summary['Config URL']         = params.config_profile_url
+// if (params.email || params.email_on_fail) {
+//     summary['E-mail Address']    = params.email
+//     summary['E-mail on failure'] = params.email_on_fail
+//     summary['MultiQC maxsize']   = params.max_multiqc_email_size
+// }
+// log.info summary.collect { k,v -> "${k.padRight(18)}: $v" }.join("\n")
+// log.info "-\033[2m--------------------------------------------------\033[0m-"
+//
+// // Check the hostnames against configured profiles
+// checkHostname()
+//
+// Channel.from(summary.collect{ [it.key, it.value] })
+//     .map { k,v -> "<dt>$k</dt><dd><samp>${v ?: '<span style=\"color:#999999;\">N/A</a>'}</samp></dd>" }
+//     .reduce { a, b -> return [a, b].join("\n            ") }
+//     .map { x -> """
+//     id: 'nf-core-cnvcalling-summary'
+//     description: " - this information is collected when the pipeline is started."
+//     section_name: 'nf-core/cnvcalling Workflow Summary'
+//     section_href: 'https://github.com/nf-core/cnvcalling'
+//     plot_type: 'html'
+//     data: |
+//         <dl class=\"dl-horizontal\">
+//             $x
+//         </dl>
+//     """.stripIndent() }
+//     .set { ch_workflow_summary }
+//
 compressedReference = hasExtension(params.fasta, 'gz')
 
 if (compressedReference) {
@@ -228,7 +192,7 @@ if (compressedReference) {
     file gz from genome_fasta_gz
 
     output:
-    file "${gz.baseName}" into ch_fasta_for_bwa_index, ch_fasta_for_gatk, ch_fasta_for_cnvnator
+    file "${gz.baseName}" into ch_fasta_for_dict, ch_fasta_for_cnvnator
 
     script:
     """
@@ -236,49 +200,33 @@ if (compressedReference) {
     """
   }
 }
-
-
-/*
- * Parse software version numbers
- */
-process get_software_versions {
-    publishDir "${params.outdir}/pipeline_info", mode: 'copy',
-        saveAs: { filename ->
-                      if (filename.indexOf(".csv") > 0) filename
-                      else null
-                }
-
-    output:
-    file 'software_versions_mqc.yaml' into ch_software_versions_yaml
-    file "software_versions.csv"
-
-    script:
-    // TODO nf-core: Get all tools to print their version number here
-    """
-    echo $workflow.manifest.version > v_pipeline.txt
-    echo $workflow.nextflow.version > v_nextflow.txt
-    fastqc --version > v_fastqc.txt
-    multiqc --version > v_multiqc.txt
-    scrape_software_versions.py &> software_versions_mqc.yaml
-    """
-}
-
-/*
- * Pre-process: prepare BWA index
- */
-process make_BWA_index {
-
-    input:
-    file fasta from ch_fasta_for_bwa_index
-
-    output:
-    file "bwa.ind*" into bwa_index
-
-    script:
-    """
-    bwa index $fasta -p bwa.ind
-    """
-}
+//
+//
+// /*
+//  * Parse software version numbers
+//  */
+// process get_software_versions {
+//     publishDir "${params.outdir}/pipeline_info", mode: 'copy',
+//         saveAs: { filename ->
+//                       if (filename.indexOf(".csv") > 0) filename
+//                       else null
+//                 }
+//
+//     output:
+//     file 'software_versions_mqc.yaml' into ch_software_versions_yaml
+//     file "software_versions.csv"
+//
+//     script:
+//     // TODO nf-core: Get all tools to print their version number here
+//     """
+//     echo $workflow.manifest.version > v_pipeline.txt
+//     echo $workflow.nextflow.version > v_nextflow.txt
+//     fastqc --version > v_fastqc.txt
+//     multiqc --version > v_multiqc.txt
+//     scrape_software_versions.py &> software_versions_mqc.yaml
+//     """
+// }
+//
 
 /*
  * Pre-process: Create fasta dictionary
@@ -286,10 +234,10 @@ process make_BWA_index {
  process createFastaDict {
 
    input:
-   file("ref.fasta") from ch_fasta_for_gatk
+   file("ref.fasta") from ch_fasta_for_dict
 
    output:
-   set file("ref.fasta"), file("ref.fasta.fai"), file("ref.dict") into ch_fastadict_CIGAR, ch_fastadict_recalibrate, ch_fastadict_BSQR, ch_fastadict_HaploCall, ch_fastadict_genotype, ch_fastadict_callsFilter, ch_fasta_for_ERDS
+   set file("ref.fasta"), file("ref.fasta.fai"), file("ref.dict") into ch_fasta_for_ERDS, ch_fastadict_VCF
 
    """
    samtools faidx ref.fasta
@@ -318,308 +266,6 @@ process make_BWA_index {
    """
  }
 
-/*
- * STEP 1 - FastQC
- */
-process fastqc {
-    tag "$name"
-    label 'process_medium'
-    publishDir "${params.outdir}/fastqc", mode: 'copy',
-        saveAs: { filename ->
-                      filename.indexOf(".zip") > 0 ? "zips/$filename" : "$filename"
-                }
-
-    input:
-    set val(name), file(reads) from ch_read_files_fastqc
-
-    output:
-    file "*_fastqc.{zip,html}" into ch_fastqc_results
-
-    script:
-    """
-    fastqc --quiet --threads $task.cpus $reads
-    """
-}
-
-
-/*
- * STEP 2 - Align with BWA
- */
- process align_BWA {
-    tag "$name"
-    label 'process_long'
-
-    input:
-    set val(name), file(reads) from ch_read_files_alignment
-    file (bwaIndex) from bwa_index.collect()
-
-    output:
-    set val(name), file ("${name}.bam") into alignments
-
-    script:
-    """
-    bwa mem bwa.ind $reads -t 8 | samtools view -S -b - > ${name}.bam
-    """
-}
-
-
-/*
- * STEP 2a - Add read group to bam
- */
-process correctBam {
-  tag "$name"
-
-  label 'process_long'
-
-  input:
-  set val(name), file (bam) from alignments
-
-
-  output:
-  set val(name), file("sort.bam") into sortbams
-
-  """
-  picard AddOrReplaceReadGroups \
-        I=$bam \
-        O=sort.bam \
-        RGID=1 \
-        RGLB=HW5CWBBXX \
-        RGPL=ILLUMINA \
-        RGPU=K00171 \
-        RGSM=$name \
-	SORT_ORDER=coordinate
-    """
-}
-
-/*
- * STEP 2b - Mark duplicate reads
- */
-process markDuplicates {
-  tag "$name"
-
-  label 'process_long'
-
-  input:
-  set val(name), file(bam) from sortbams
-
-  output:
-  set val(name), file("dups.bam") into dupbams
-
-  """
-  picard MarkDuplicates \
-  I=$bam \
-  O=dups.bam \
-  M=dup_metrics.txt
-  """
-}
-
-/*
-* STEP 2c -  Recalibrate base score
-*/
-process recalibrateBase {
-  tag "$name"
-
-  label 'process_long'
-
-  input:
-  set val(name), file(bam) from dupbams
-  set file(vars_ref), file(vars_ref_idx) from ch_vars_ref.collect()
-  set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_recalibrate.collect()
-
-  output:
-  set val(name), file(bam), file("recal_data.table") into recalTable
-
-  """
-  gatk BaseRecalibrator \
-   -I $bam \
-   -R $fasta \
-   --known-sites $vars_ref \
-   -O recal_data.table
-  """
-}
-
-/*
-* STEP 2d -  Apply recalibration from recalibrateBase
-*/
-process applyRecalibration {
-  tag "$name"
-
-  label 'process_long'
-
-  publishDir "${params.outdir}/alignments", mode: 'copy'
-
-  input:
-  set val(name), file(bam), file(baseTable) from recalTable
-  set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_BSQR.collect()
-
-
-  output:
-  set val(name), file("${name}_genetic.bam"), file("${name}_genetic.bai") into calBams, ch_bams_cnvnator, ch_bams_erds
-
-  """
-  gatk ApplyBQSR \
-    -R $fasta \
-    -I $bam \
-    --bqsr-recal-file $baseTable \
-    -O ${name}_genetic.bam
-  """
-
-}
-
-
-/*
- * STEP 3 - Perform germline variant calling
- */
-
- /*
- * STEP 3a -Prepare gVCFs
- */
- process callHaplotype {
-   tag "$name"
-
-   label 'process_long'
-
-   input:
-   set val(name), file(bam), file(bai) from calBams
-   set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_HaploCall.collect()
-
-
-   output:
-   set val(name), file("output.g.vcf.gz") into ch_vcf_ini
-
-   """
-   gatk --java-options "-Xmx16g" HaplotypeCaller  \
-      -R $fasta \
-      -I $bam \
-      -O output.g.vcf.gz \
-      -ERC GVCF
-   """
-
- }
-
- /*
-  * STEP 3b - Index VCFs
-  */
- process indexVCFs {
-   tag "$name"
-
-   input:
-   set val(name), file("g.vcf.gz") from ch_vcf_ini
-
-   output:
-   set val(name), file("g.vcf.gz"), file("g.vcf.gz.tbi") into ch_vcf_idx
-
-   """
-   tabix -p vcf g.vcf.gz
-   """
- }
-
-
- /*
-  * STEP 3c - Prepare DB of VCFs
-  */
- process createMapFile {
-   tag "$name"
-
-   input:
-   set val(name), file("${name}.vcf.gz"), file("${name}.vcf.gz.tbi") from ch_vcf_idx
-
-   output:
-   set file("${name}.vcf.gz"), file("${name}.vcf.gz.tbi") into ch_vcfs
-   file("${name}.map") into ch_map
-
-   """
-   echo "$name\t${name}.vcf.gz" > ${name}.map
-   """
- }
-
- /*
-  * STEP 3d - Prepare DB of VCFs
-  */
- process makeGenomicsDB {
-
-   input:
-   file(map) from ch_map.collect()
-   file(vcf) from ch_vcfs.collect()
-
-   output:
-   file("my_database/") into ch_vcfs_db
-
-   """
-   for f in *.map
-   do
-    cat \$f >> sample_map.txt
-  done
-
-  ## Create intervals list file
-  for ch in `seq 1 1 22`
-  do
-    echo \$ch >> intervals.list
-  done
-  echo X >> intervals.list
-  echo Y >> intervals.list
-
-   gatk --java-options "-Xmx4g -Xms4g" \
-        GenomicsDBImport \
-        --genomicsdb-workspace-path my_database \
-        --batch-size 50 \
-        -L intervals.list \
-        --sample-name-map sample_map.txt \
-        --reader-threads 5
-   """
- }
-
- /*
-  * STEP 3e - Perform joint genotyping
-  */
- process genotypeGVCF {
-
-   input:
-   file(db) from ch_vcfs_db
-   set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_genotype.collect()
-
-   output:
-   set file("allSamples_genomic.vcf.gz"), file("allSamples_genomic.vcf.gz.tbi") into ch_comb_vcf
-
-   """
-   mkdir tmp
-   gatk --java-options "-Xmx4g" GenotypeGVCFs \
-     -R $fasta \
-     -V gendb://my_database \
-     -O allSamples_genomic.vcf.gz \
-     --tmp-dir ./tmp
-   """
- }
-
- /*
-  * STEP 3f - Hard filtering of variants (Apply thresholds recommended for RNAseq)
-  */
- process filterVariants {
-
-   publishDir "${params.outdir}/VariantCalling", mode: 'copy'
-
-
-   input:
-   set file(vcf), file(vcf_idx) from ch_comb_vcf
-   set file(fasta), file(fastaidx), file(fastadic) from ch_fastadict_callsFilter.collect()
-
-   output:
-   set file("allSamples_genomic_filtered.vcf.gz"), file("allSamples_genomic.vcf.gz.tbi") into ch_filt_vcf
-
-   """
-   gatk --java-options "-Xmx4g" VariantFiltration \
-     -R $fasta \
-     -V ${vcf} \
-     --window 35 \
-     --cluster 3 \
-     --filter-name "FS" \
-     --filter "FS > 30.0" \
-     --filter-name "QD" \
-     --filter "QD < 2.0" \
-     -O allSamples_genomic_filtered.vcf.gz
-   """
- }
-
  /*
   * STEP 4 - CNV calling with CNVnator
   */
@@ -629,7 +275,7 @@ process applyRecalibration {
     label 'process_medium'
 
     input:
-    set sampID, file(bam), file(bai) from ch_bams_cnvnator
+    tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx) from ch_input_cnvnator
     file(fasta) from ch_fastaChr_cnvnator.collect()
     val(genome) from params.genome
     val(bin_size) from params.binSize
@@ -672,6 +318,8 @@ process applyRecalibration {
   */
   process clusterCNVnator {
 
+    tag "$sampID"
+
     label 'process_low'
 
     input:
@@ -702,15 +350,14 @@ process applyRecalibration {
      label 'process_medium'
 
      input:
-     set sampID, file(bam), file(bai) from ch_bams_erds
-     file(fasta) from ch_fasta_for_ERDS
-     set file(vcf), file(vcf_idx) from ch_comb_vcf.collect()
+     tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx) from ch_input_erds
+     tuple file(fasta), file(fai), file(dict) from ch_fasta_for_ERDS.collect()
 
      output:
      set sampID, file("${sampID}/${sampID}.erds.vcf") into ch_ERDS_calls
 
      """
-     erds_pipeline.pl -b $bam -v $vcf -o ./$sampID -r $fasta --name $sampID --samtools /opt/conda/envs/nf-core-cnvcalling-1.0dev/bin/samtools
+     erds_pipeline.pl -b $bam -v $vcf -o ./$sampID -r $fasta -n $sampID --samtools /opt/conda/envs/nf-core-cnvcalling/bin/samtools
      """
 
    }
@@ -786,227 +433,453 @@ process combineCalls {
 process filterCalls {
   tag "$sampID"
 
+  publishDir "${params.outdir}/CNVs/TXT/", mode: 'copy'
+
   input:
   set sampID, file(combCall) from ch_final_calls
   file(gapsRef) from gapsRef
 
   output:
-  set sampID, file("${sampID}_cnvnator_erds_filteredCNVs.txt") into filtered_calls
+  set sampID, file("${sampID}.ERDS_CNVnator_CNVs.filtered.txt") into filtered_calls, ch_cnvs_mosaichunter
 
   """
-  filterCNVs.R $combCall $gapsRef ${sampID}_cnvnator_erds_filteredCNVs.txt
+  filterCNVs.R $combCall $gapsRef ${sampID}.ERDS_CNVnator_CNVs.filtered.txt
+  """
+}
+
+// Convert CNVnator output to VCF
+process convert2VCF {
+
+  tag "$sampID"
+
+  input:
+  set sampID, file(merged) from filtered_calls
+
+  output:
+  tuple sampID, file("${sampID}.CNVs.vcf") into vcfs
+
+  """
+  ## Make Header
+echo "##fileformat=VCFv4.3
+##fileDate=$date
+##source=CNVnator
+##INFO=<ID=END,Number=1,Type=Integer,Description='End position of the variant described in this record'>
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description='Difference in length between REF and ALT alleles'>
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description='Type of structural variant'>
+##FORMAT=<ID=GT,Number=1,Type=String,Description='Genotype'>
+##FORMAT=<ID=NRD,Number=1,Type=String,Description='Normalized Read depth'>
+##FORMAT=<ID=E,Number=1,Type=Float,Description='e-val2'>
+##FORMAT=<ID=q0,Number=1,Type=Float,Description='q0'>
+##FORMAT=<ID=NCNV,Number=1,Type=Integer,Description='Number of CNVs'>
+##FORMAT=<ID=LCNVS,Number=1,Type=Integer,Description='Length of CNVS'>
+##FORMAT=<ID=LG,Number=1,Type=Integer,Description='Length of gaps'>
+##FORMAT=<ID=PG,Number=1,Type=Float,Description='Proportion of Gaps'>
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t$sampID" > ${sampID}.CNVs.vcf
+
+## Add calls
+tail -n +2 $merged | awk  '{OFS = "\t"}!/^#/{print \$2, \$3, ".", "N", ".", "<"\$5">", "PASS", "SVTYPE="\$5";END="\$4";SVLEN="\$6,\
+   "GT:NRD:E:q0:NCNV:LCNVS:LG:PG", "1/0:"\$7":"\$8":"\$9":"\$10":"\$11":"\$12":"\$13  }' - \
+   >> ${sampID}.CNVs.vcf
+   sed -i 's/:-/:\\./g' ${sampID}.CNVs.vcf ## Change empty values to .
+   sed -i 's/\\x27/\\x22/g' ${sampID}.CNVs.vcf ## Change ' for "
+  """
+}
+
+// Compress, sort and index vcf
+process prepareVCF {
+
+  tag "$sampID"
+
+  input:
+  tuple sampID, file(vcf) from vcfs
+  tuple file(fasta), file(fastaidx), file(dict) from ch_fastadict_VCF.collect()
+
+  output:
+  tuple sampID, file("${vcf}.gz"), file("${vcf}.gz.tbi")  into sortVCF
+
+  """
+  bcftools reheader -f $fastaidx -o header.vcf $vcf
+  bcftools sort -o ${vcf}.gz -O z  header.vcf
+  tabix -p vcf ${vcf}.gz
   """
 }
 
 
-/*
- * STEP 2 - MultiQC
- */
-process multiqc {
-    publishDir "${params.outdir}/MultiQC", mode: 'copy'
+// Add annotation to CNVs
+process annotateVCF {
 
-    input:
-    file (multiqc_config) from ch_multiqc_config
-    file (mqc_custom_config) from ch_multiqc_custom_config.collect().ifEmpty([])
-    // TODO nf-core: Add in log files from your new processes for MultiQC to find!
-    file ('fastqc/*') from ch_fastqc_results.collect().ifEmpty([])
-    file ('software_versions/*') from ch_software_versions_yaml.collect()
-    file workflow_summary from ch_workflow_summary.collectFile(name: "workflow_summary_mqc.yaml")
+  tag "$sampID"
+  publishDir "${params.outdir}/CNVs/VCF/", mode: 'copy'
 
-    output:
-    file "*multiqc_report.html" into ch_multiqc_report
-    file "*_data"
-    file "multiqc_plots"
+  input:
+  set sampID, file(vcf), file(vcftbi) from sortVCF
+  file(commonCNV)
+  file(clinvarCNV)
+  file(gtfRef)
+  file(omim)
 
-    script:
-    rtitle = custom_runName ? "--title \"$custom_runName\"" : ''
-    rfilename = custom_runName ? "--filename " + custom_runName.replaceAll('\\W','_').replaceAll('_+','_') + "_multiqc_report" : ''
-    custom_config_file = params.multiqc_config ? "--config $mqc_custom_config" : ''
-    // TODO nf-core: Specify which MultiQC modules to use with -m for a faster run time
-    """
-    multiqc -f $rtitle $rfilename $custom_config_file .
-    """
+  output:
+  set sampID, file("${sampID}.ERDS_CNVnator_CNVs.annotated.vcf.gz"), file("${sampID}.ERDS_CNVnator_CNVs.annotated.vcf.gz.tbi")  into annotatedVCF
+
+  """
+  annotateCNVs.R $vcf $commonCNV $clinvarCNV $gtfRef $omim ${sampID}.ERDS_CNVnator_CNVs.annotated.vcf
+  bgzip ${sampID}.ERDS_CNVnator_CNVs.annotated.vcf
+  tabix -p vcf ${sampID}.ERDS_CNVnator_CNVs.annotated.vcf.gz
+  """
+
 }
 
-/*
- * STEP 3 - Output Description HTML
- */
-process output_documentation {
 
-    publishDir "${params.outdir}/pipeline_info", mode: 'copy'
 
-    input:
-    file output_docs from ch_output_docs
 
-    output:
-    file "results_description.html"
-
-    script:
-    """
-    markdown_to_html.py $output_docs -o results_description.html
-    """
-}
 
 /*
- * Completion e-mail notification
+* Prioritize variants:
+* - Remove CNVs with overlap > 20% with commonCNVs
+* - Select CNVs with overlap > 80% pathogenic variants (subset1)
+* - Select CNVs overlapping exons in OMIM genes (subset2)
+* - Select CNVs overlapping exons in GENCODE genes (subset3)
+*/
+process prioritizeCNVs {
+
+  tag "$sampID"
+  publishDir "${params.outdir}/CNVs/XLSX/", mode: 'copy'
+
+
+  input:
+  set sampID, file(vcf), file(vcftbi) from annotatedVCF
+
+  output:
+  file("${sampID}.ERDS_CNVnator_CNVs.Prioritization.xlsx") into priorCNV
+
+  script:
+  """
+  prioritizeCNVs.R $vcf ${sampID}.ERDS_CNVnator_CNVs.Prioritization.xlsx
+  """
+
+}
+
+/*
+ *
  */
-workflow.onComplete {
+ process prepareINDELs {
+   tag "$sampID"
 
-    // Set up the e-mail variables
-    def subject = "[nf-core/cnvcalling] Successful: $workflow.runName"
-    if (!workflow.success) {
-        subject = "[nf-core/cnvcalling] FAILED: $workflow.runName"
-    }
-    def email_fields = [:]
-    email_fields['version'] = workflow.manifest.version
-    email_fields['runName'] = custom_runName ?: workflow.runName
-    email_fields['success'] = workflow.success
-    email_fields['dateComplete'] = workflow.complete
-    email_fields['duration'] = workflow.duration
-    email_fields['exitStatus'] = workflow.exitStatus
-    email_fields['errorMessage'] = (workflow.errorMessage ?: 'None')
-    email_fields['errorReport'] = (workflow.errorReport ?: 'None')
-    email_fields['commandLine'] = workflow.commandLine
-    email_fields['projectDir'] = workflow.projectDir
-    email_fields['summary'] = summary
-    email_fields['summary']['Date Started'] = workflow.start
-    email_fields['summary']['Date Completed'] = workflow.complete
-    email_fields['summary']['Pipeline script file path'] = workflow.scriptFile
-    email_fields['summary']['Pipeline script hash ID'] = workflow.scriptId
-    if (workflow.repository) email_fields['summary']['Pipeline repository Git URL'] = workflow.repository
-    if (workflow.commitId) email_fields['summary']['Pipeline repository Git Commit'] = workflow.commitId
-    if (workflow.revision) email_fields['summary']['Pipeline Git branch/tag'] = workflow.revision
-    email_fields['summary']['Nextflow Version'] = workflow.nextflow.version
-    email_fields['summary']['Nextflow Build'] = workflow.nextflow.build
-    email_fields['summary']['Nextflow Compile Timestamp'] = workflow.nextflow.timestamp
+   input:
+   tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx) from ch_input_indels
 
-    // TODO nf-core: If not using MultiQC, strip out this code (including params.max_multiqc_email_size)
-    // On success try attach the multiqc report
-    def mqc_report = null
-    try {
-        if (workflow.success) {
-            mqc_report = ch_multiqc_report.getVal()
-            if (mqc_report.getClass() == ArrayList) {
-                log.warn "[nf-core/cnvcalling] Found multiple reports from process 'multiqc', will use only one"
-                mqc_report = mqc_report[0]
-            }
-        }
-    } catch (all) {
-        log.warn "[nf-core/cnvcalling] Could not attach MultiQC report to summary email"
-    }
+   output:
+   tuple sampID, file("${sampID}.indels.vcf.gz") into ch_vcf_indels
 
-    // Check if we are only sending emails on failure
-    email_address = params.email
-    if (!params.email && params.email_on_fail && !workflow.success) {
-        email_address = params.email_on_fail
-    }
+   """
+   bcftools view -v indels  -f .,PASS $vcf -o ${sampID}.indels.vcf.gz -O z
+   """
 
-    // Render the TXT template
-    def engine = new groovy.text.GStringTemplateEngine()
-    def tf = new File("$baseDir/assets/email_template.txt")
-    def txt_template = engine.createTemplate(tf).make(email_fields)
-    def email_txt = txt_template.toString()
+ }
 
-    // Render the HTML template
-    def hf = new File("$baseDir/assets/email_template.html")
-    def html_template = engine.createTemplate(hf).make(email_fields)
-    def email_html = html_template.toString()
+ process indelsToBed {
 
-    // Render the sendmail template
-    def smail_fields = [ email: email_address, subject: subject, email_txt: email_txt, email_html: email_html, baseDir: "$baseDir", mqcFile: mqc_report, mqcMaxSize: params.max_multiqc_email_size.toBytes() ]
-    def sf = new File("$baseDir/assets/sendmail_template.txt")
-    def sendmail_template = engine.createTemplate(sf).make(smail_fields)
-    def sendmail_html = sendmail_template.toString()
+   tag "$sampID"
 
-    // Send the HTML e-mail
-    if (email_address) {
-        try {
-            if (params.plaintext_email) { throw GroovyException('Send plaintext e-mail, not HTML') }
-            // Try to send HTML e-mail using sendmail
-            [ 'sendmail', '-t' ].execute() << sendmail_html
-            log.info "[nf-core/cnvcalling] Sent summary e-mail to $email_address (sendmail)"
-        } catch (all) {
-            // Catch failures and try with plaintext
-            [ 'mail', '-s', subject, email_address ].execute() << email_txt
-            log.info "[nf-core/cnvcalling] Sent summary e-mail to $email_address (mail)"
-        }
-    }
+   input:
+   tuple sampID, file(vcf) from ch_vcf_indels
 
-    // Write summary e-mail HTML to a file
-    def output_d = new File("${params.outdir}/pipeline_info/")
-    if (!output_d.exists()) {
-        output_d.mkdirs()
-    }
-    def output_hf = new File(output_d, "pipeline_report.html")
-    output_hf.withWriter { w -> w << email_html }
-    def output_tf = new File(output_d, "pipeline_report.txt")
-    output_tf.withWriter { w -> w << email_txt }
+   output:
+   set sampID, file("${sampID}.indels.bed") into ch_indels_bed
 
-    c_green = params.monochrome_logs ? '' : "\033[0;32m";
-    c_purple = params.monochrome_logs ? '' : "\033[0;35m";
-    c_red = params.monochrome_logs ? '' : "\033[0;31m";
-    c_reset = params.monochrome_logs ? '' : "\033[0m";
+   """
+   ## Decompress VCF on the fly. Add +/- 5 bp as recommended in MosaicHunter
+   awk  '{OFS = "\t"}!/^#/{print \$1, \$2 - 5, \$2 + (length(\$2)) + 5}' <(gzip -cd $vcf) > ${sampID}.indels.bed
+   """
 
-    if (workflow.stats.ignoredCount > 0 && workflow.success) {
-        log.info "-${c_purple}Warning, pipeline completed, but with errored process(es) ${c_reset}-"
-        log.info "-${c_red}Number of ignored errored process(es) : ${workflow.stats.ignoredCount} ${c_reset}-"
-        log.info "-${c_green}Number of successfully ran process(es) : ${workflow.stats.succeedCount} ${c_reset}-"
-    }
+ }
 
-    if (workflow.success) {
-        log.info "-${c_purple}[nf-core/cnvcalling]${c_green} Pipeline completed successfully${c_reset}-"
-    } else {
-        checkHostname()
-        log.info "-${c_purple}[nf-core/cnvcalling]${c_red} Pipeline completed with errors${c_reset}-"
-    }
+ process cnvsToBed {
+
+   tag "$sampID"
+
+   input:
+   tuple sampID, file(txt) from ch_cnvs_mosaichunter
+
+   output:
+   tuple sampID, file("${sampID}.cnvs.bed") into ch_cnvs_bed
+
+   """
+   cut -f2-4 $txt | tail -n +2 - > ${sampID}.cnvs.bed
+   """
+
+ }
+
+ch_comb = ch_indels_bed.join(ch_cnvs_bed)
+
+process mergeBeds {
+
+  tag "$sampID"
+
+  input:
+  tuple sampID, file(indels), file(cnvs) from ch_comb
+
+  output:
+  tuple sampID, file("${sampID}.merged.bed") into ch_merged_bed
+
+  """
+  cp $indels ${sampID}.merged.bed
+  cat $cnvs >> ${sampID}.merged.bed
+  """
 
 }
 
+ch_input_mosaichunter_input = ch_input_mosaichunter.join(ch_merged_bed)
 
-def nfcoreHeader() {
-    // Log colors ANSI codes
-    c_black = params.monochrome_logs ? '' : "\033[0;30m";
-    c_blue = params.monochrome_logs ? '' : "\033[0;34m";
-    c_cyan = params.monochrome_logs ? '' : "\033[0;36m";
-    c_dim = params.monochrome_logs ? '' : "\033[2m";
-    c_green = params.monochrome_logs ? '' : "\033[0;32m";
-    c_purple = params.monochrome_logs ? '' : "\033[0;35m";
-    c_reset = params.monochrome_logs ? '' : "\033[0m";
-    c_white = params.monochrome_logs ? '' : "\033[0;37m";
-    c_yellow = params.monochrome_logs ? '' : "\033[0;33m";
+process runMosaicHunter {
 
-    return """    -${c_dim}--------------------------------------------------${c_reset}-
-                                            ${c_green},--.${c_black}/${c_green},-.${c_reset}
-    ${c_blue}        ___     __   __   __   ___     ${c_green}/,-._.--~\'${c_reset}
-    ${c_blue}  |\\ | |__  __ /  ` /  \\ |__) |__         ${c_yellow}}  {${c_reset}
-    ${c_blue}  | \\| |       \\__, \\__/ |  \\ |___     ${c_green}\\`-._,-`-,${c_reset}
-                                            ${c_green}`._,._,\'${c_reset}
-    ${c_purple}  nf-core/cnvcalling v${workflow.manifest.version}${c_reset}
-    -${c_dim}--------------------------------------------------${c_reset}-
-    """.stripIndent()
+  tag "$sampID"
+  label 'process_medium'
+  publishDir "${params.outdir}/Mosaics/SNVs/TXT/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
+  publishDir "${params.outdir}/Mosaics/SNVs/logs/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
+
+  input:
+  tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx), file(bed) from ch_input_mosaichunter_input
+  file(fasta) from ch_fasta_for_mosaichunter
+  val(conf) from params.mosaichunter_config
+  val(mode) from params.mosaichunter_mode
+  file(gapsRef) from gapsRef
+
+
+  output:
+  tuple sampID, file("final.passed.tsv") into ch_mosaichunter_out
+  file("stdout*.log")
+
+  script:
+  """
+  java -jar ~/MosaicHunter/build/mosaichunter.jar $conf \
+  -P input_file=$bam \
+  -P reference_file=$fasta \
+  -P output_dir=./ \
+  -P mosaic_filter.mode=$mode \
+  -P repetitive_region_filter.bed_file=$gapsRef \
+  -P indel_region_filter.bed_file=$bed
+  """
+
 }
 
-def checkHostname() {
-    def c_reset = params.monochrome_logs ? '' : "\033[0m"
-    def c_white = params.monochrome_logs ? '' : "\033[0;37m"
-    def c_red = params.monochrome_logs ? '' : "\033[1;91m"
-    def c_yellow_bold = params.monochrome_logs ? '' : "\033[1;93m"
-    if (params.hostnames) {
-        def hostname = "hostname".execute().text.trim()
-        params.hostnames.each { prof, hnames ->
-            hnames.each { hname ->
-                if (hostname.contains(hname) && !workflow.profile.contains(prof)) {
-                    log.error "====================================================\n" +
-                            "  ${c_red}WARNING!${c_reset} You are running with `-profile $workflow.profile`\n" +
-                            "  but your machine hostname is ${c_white}'$hostname'${c_reset}\n" +
-                            "  ${c_yellow_bold}It's highly recommended that you use `-profile $prof${c_reset}`\n" +
-                            "============================================================"
-                }
-            }
-        }
-    }
+process convertAvinput {
+
+  tag "$sampID"
+
+  input:
+  tuple sampID, file(tsv) from ch_mosaichunter_out
+
+  output:
+  tuple sampID, file("${sampID}.avinput.txt") into ch_mosaichunter_avinput
+
+  script:
+  """
+  awk  '{OFS = "\t"}!/^#/{print \$1, \$2, \$2, \$3, \$3=\$7?\$9:\$7, \$4, \$7, \$8, \$9, \$10}' $tsv > ${sampID}.avinput.txt
+  """
+
 }
 
+process annotateSNPs {
+
+  tag "$sampID"
+//  publishDir "${params.outdir}/Mosaics/SNVs/TXT/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
+//  publishDir "${params.outdir}/Mosaics/SNVs/logs/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
+
+  input:
+  tuple sampID, file(avinput) from ch_mosaichunter_avinput
+  file(annovar)
+  file(annovarVar)
+  file(annovarCod)
+  file(annovarFold)
+
+  output:
+
+  """
+  perl $annovar $avinput $annovarFold -buildver hg19 -out myanno -remove -protocol refGene,cytoBand,genomicSuperDups,gnomad211_exome,gnomad211_genome,avsnp150,kaviar_20150923 -operation gx,r,f,f -nastring . -csvout -polish
+  """
+}
+
+
+// /*
+//  * STEP 3 - Output Description HTML
+//  */
+// process output_documentation {
+//
+//     publishDir "${params.outdir}/pipeline_info", mode: 'copy'
+//
+//     input:
+//     file output_docs from ch_output_docs
+//
+//     output:
+//     file "results_description.html"
+//
+//     script:
+//     """
+//     markdown_to_html.py $output_docs -o results_description.html
+//     """
+// }
+//
+// /*
+//  * Completion e-mail notification
+//  */
+// workflow.onComplete {
+//
+//     // Set up the e-mail variables
+//     def subject = "[nf-core/cnvcalling] Successful: $workflow.runName"
+//     if (!workflow.success) {
+//         subject = "[nf-core/cnvcalling] FAILED: $workflow.runName"
+//     }
+//     def email_fields = [:]
+//     email_fields['version'] = workflow.manifest.version
+//     email_fields['runName'] = custom_runName ?: workflow.runName
+//     email_fields['success'] = workflow.success
+//     email_fields['dateComplete'] = workflow.complete
+//     email_fields['duration'] = workflow.duration
+//     email_fields['exitStatus'] = workflow.exitStatus
+//     email_fields['errorMessage'] = (workflow.errorMessage ?: 'None')
+//     email_fields['errorReport'] = (workflow.errorReport ?: 'None')
+//     email_fields['commandLine'] = workflow.commandLine
+//     email_fields['projectDir'] = workflow.projectDir
+//     email_fields['summary'] = summary
+//     email_fields['summary']['Date Started'] = workflow.start
+//     email_fields['summary']['Date Completed'] = workflow.complete
+//     email_fields['summary']['Pipeline script file path'] = workflow.scriptFile
+//     email_fields['summary']['Pipeline script hash ID'] = workflow.scriptId
+//     if (workflow.repository) email_fields['summary']['Pipeline repository Git URL'] = workflow.repository
+//     if (workflow.commitId) email_fields['summary']['Pipeline repository Git Commit'] = workflow.commitId
+//     if (workflow.revision) email_fields['summary']['Pipeline Git branch/tag'] = workflow.revision
+//     email_fields['summary']['Nextflow Version'] = workflow.nextflow.version
+//     email_fields['summary']['Nextflow Build'] = workflow.nextflow.build
+//     email_fields['summary']['Nextflow Compile Timestamp'] = workflow.nextflow.timestamp
+//
+//     // TODO nf-core: If not using MultiQC, strip out this code (including params.max_multiqc_email_size)
+//     // On success try attach the multiqc report
+//     def mqc_report = null
+//     try {
+//         if (workflow.success) {
+//             mqc_report = ch_multiqc_report.getVal()
+//             if (mqc_report.getClass() == ArrayList) {
+//                 log.warn "[nf-core/cnvcalling] Found multiple reports from process 'multiqc', will use only one"
+//                 mqc_report = mqc_report[0]
+//             }
+//         }
+//     } catch (all) {
+//         log.warn "[nf-core/cnvcalling] Could not attach MultiQC report to summary email"
+//     }
+//
+//     // Check if we are only sending emails on failure
+//     email_address = params.email
+//     if (!params.email && params.email_on_fail && !workflow.success) {
+//         email_address = params.email_on_fail
+//     }
+//
+//     // Render the TXT template
+//     def engine = new groovy.text.GStringTemplateEngine()
+//     def tf = new File("$baseDir/assets/email_template.txt")
+//     def txt_template = engine.createTemplate(tf).make(email_fields)
+//     def email_txt = txt_template.toString()
+//
+//     // Render the HTML template
+//     def hf = new File("$baseDir/assets/email_template.html")
+//     def html_template = engine.createTemplate(hf).make(email_fields)
+//     def email_html = html_template.toString()
+//
+//     // Render the sendmail template
+//     def smail_fields = [ email: email_address, subject: subject, email_txt: email_txt, email_html: email_html, baseDir: "$baseDir", mqcFile: mqc_report, mqcMaxSize: params.max_multiqc_email_size.toBytes() ]
+//     def sf = new File("$baseDir/assets/sendmail_template.txt")
+//     def sendmail_template = engine.createTemplate(sf).make(smail_fields)
+//     def sendmail_html = sendmail_template.toString()
+//
+//     // Send the HTML e-mail
+//     if (email_address) {
+//         try {
+//             if (params.plaintext_email) { throw GroovyException('Send plaintext e-mail, not HTML') }
+//             // Try to send HTML e-mail using sendmail
+//             [ 'sendmail', '-t' ].execute() << sendmail_html
+//             log.info "[nf-core/cnvcalling] Sent summary e-mail to $email_address (sendmail)"
+//         } catch (all) {
+//             // Catch failures and try with plaintext
+//             [ 'mail', '-s', subject, email_address ].execute() << email_txt
+//             log.info "[nf-core/cnvcalling] Sent summary e-mail to $email_address (mail)"
+//         }
+//     }
+//
+//     // Write summary e-mail HTML to a file
+//     def output_d = new File("${params.outdir}/pipeline_info/")
+//     if (!output_d.exists()) {
+//         output_d.mkdirs()
+//     }
+//     def output_hf = new File(output_d, "pipeline_report.html")
+//     output_hf.withWriter { w -> w << email_html }
+//     def output_tf = new File(output_d, "pipeline_report.txt")
+//     output_tf.withWriter { w -> w << email_txt }
+//
+//     c_green = params.monochrome_logs ? '' : "\033[0;32m";
+//     c_purple = params.monochrome_logs ? '' : "\033[0;35m";
+//     c_red = params.monochrome_logs ? '' : "\033[0;31m";
+//     c_reset = params.monochrome_logs ? '' : "\033[0m";
+//
+//     if (workflow.stats.ignoredCount > 0 && workflow.success) {
+//         log.info "-${c_purple}Warning, pipeline completed, but with errored process(es) ${c_reset}-"
+//         log.info "-${c_red}Number of ignored errored process(es) : ${workflow.stats.ignoredCount} ${c_reset}-"
+//         log.info "-${c_green}Number of successfully ran process(es) : ${workflow.stats.succeedCount} ${c_reset}-"
+//     }
+//
+//     if (workflow.success) {
+//         log.info "-${c_purple}[nf-core/cnvcalling]${c_green} Pipeline completed successfully${c_reset}-"
+//     } else {
+//         checkHostname()
+//         log.info "-${c_purple}[nf-core/cnvcalling]${c_red} Pipeline completed with errors${c_reset}-"
+//     }
+//
+// }
+//
+//
+// def nfcoreHeader() {
+//     // Log colors ANSI codes
+//     c_black = params.monochrome_logs ? '' : "\033[0;30m";
+//     c_blue = params.monochrome_logs ? '' : "\033[0;34m";
+//     c_cyan = params.monochrome_logs ? '' : "\033[0;36m";
+//     c_dim = params.monochrome_logs ? '' : "\033[2m";
+//     c_green = params.monochrome_logs ? '' : "\033[0;32m";
+//     c_purple = params.monochrome_logs ? '' : "\033[0;35m";
+//     c_reset = params.monochrome_logs ? '' : "\033[0m";
+//     c_white = params.monochrome_logs ? '' : "\033[0;37m";
+//     c_yellow = params.monochrome_logs ? '' : "\033[0;33m";
+//
+//     return """    -${c_dim}--------------------------------------------------${c_reset}-
+//                                             ${c_green},--.${c_black}/${c_green},-.${c_reset}
+//     ${c_blue}        ___     __   __   __   ___     ${c_green}/,-._.--~\'${c_reset}
+//     ${c_blue}  |\\ | |__  __ /  ` /  \\ |__) |__         ${c_yellow}}  {${c_reset}
+//     ${c_blue}  | \\| |       \\__, \\__/ |  \\ |___     ${c_green}\\`-._,-`-,${c_reset}
+//                                             ${c_green}`._,._,\'${c_reset}
+//     ${c_purple}  nf-core/cnvcalling v${workflow.manifest.version}${c_reset}
+//     -${c_dim}--------------------------------------------------${c_reset}-
+//     """.stripIndent()
+// }
+//
+// def checkHostname() {
+//     def c_reset = params.monochrome_logs ? '' : "\033[0m"
+//     def c_white = params.monochrome_logs ? '' : "\033[0;37m"
+//     def c_red = params.monochrome_logs ? '' : "\033[1;91m"
+//     def c_yellow_bold = params.monochrome_logs ? '' : "\033[1;93m"
+//     if (params.hostnames) {
+//         def hostname = "hostname".execute().text.trim()
+//         params.hostnames.each { prof, hnames ->
+//             hnames.each { hname ->
+//                 if (hostname.contains(hname) && !workflow.profile.contains(prof)) {
+//                     log.error "====================================================\n" +
+//                             "  ${c_red}WARNING!${c_reset} You are running with `-profile $workflow.profile`\n" +
+//                             "  but your machine hostname is ${c_white}'$hostname'${c_reset}\n" +
+//                             "  ${c_yellow_bold}It's highly recommended that you use `-profile $prof${c_reset}`\n" +
+//                             "============================================================"
+//                 }
+//             }
+//         }
+//     }
+// }
+//
 // Check file extension
 def hasExtension(it, extension) {
     it.toString().toLowerCase().endsWith(extension.toLowerCase())
