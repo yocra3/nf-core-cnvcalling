@@ -79,15 +79,24 @@ ch_output_docs = file("$baseDir/docs/output.md", checkIfExists: true)
 /*
  * Create a channel for input read files
  */
+
 if (params.inputTable) {
       Channel
             .fromPath(params.inputTable)
             .splitCsv(sep: "\t")
             .map { row -> [ row[0], file(row[1], checkIfExists: true), file(row[1] + ".bai", checkIfExists: true) ,
-             file(row[2], checkIfExists: true),  file(row[2] + ".tbi", checkIfExists: true) ]  }
+             file(row[2], checkIfExists: true),  file(row[2] + ".tbi", checkIfExists: true) ] }
             .ifEmpty { exit 1, "params.inputTable was empty - no input files supplied" }
             .into { ch_input_cnvnator; ch_input_erds; ch_input_mosaichunter; ch_input_indels; ch_input_mrmosaic }
+
+            Channel
+              .fromPath(params.inputTable)
+              .splitCsv(sep: "\t")
+              .map { row -> [ row[0], row[3] ]}
+              .into { ch_sex_CNVs;  ch_sex_mosaics}
+
 } else { exit 1, "--inputTable should be text file with the sample id, a bam file and a vcf file should be provided." }
+
 
 if (params.fasta && !params.skipAlignment) {
   if (hasExtension(params.fasta, 'gz')) {
@@ -116,9 +125,12 @@ commonCNV = file("${params.commonCNV}")
 clinvarCNV = file("${params.clinvarCNV}")
 gtfRef = file("${params.gtfRef}")
 omim = file("${params.omim}")
+omim_map = file("${params.omim_map}")
+mosaichunter_config = file("${params.mosaichunter_config}")
 annovar = file("${params.annovarPath}/table_annovar.pl")
 annovarVar = file("${params.annovarPath}/annotate_variation.pl")
 annovarCod = file("${params.annovarPath}/coding_change.pl")
+annovarXref = file("${params.annovarPath}/example/gene_fullxref.txt")
 annovarFold = file("${params.annovarFold}")
 
 //
@@ -411,18 +423,20 @@ ch_combined_calls = ch_cnvnator_clustercalls.join(ch_erds_clustercalls)
 */
 process combineCalls {
   tag "$sampID"
+  publishDir "${params.outdir}/CNVs/TXT/Raw/", mode: 'copy'
 
   input:
   set sampID, file(cnvnatorCall), file(erdsCall) from ch_combined_calls
 
   output:
-  set sampID, file("${sampID}_cnvnator_erds_combinedCNVs.txt") into ch_final_calls
+  set sampID, file("${sampID}.ERDS_CNVnator_CNVs.raw.txt") into ch_final_calls
 
   """
-  python2 ~/TCAG-WGS-CNV-workflow/add_features.py -i $cnvnatorCall -a $erdsCall -o ${sampID}_cnvnator_erds_combinedCNVs.txt -s $sampID -c 0 -p reciprocal
+  python2 ~/TCAG-WGS-CNV-workflow/add_features.py -i $cnvnatorCall -a $erdsCall -o ${sampID}.ERDS_CNVnator_CNVs.raw.txt -s $sampID -c 0 -p reciprocal
   """
 }
 
+ch_final_calls_sex = ch_final_calls.join(ch_sex_CNVs)
 
 /*
 * STEP 5e - Filter CNV calls
@@ -433,17 +447,19 @@ process combineCalls {
 process filterCalls {
   tag "$sampID"
 
-  publishDir "${params.outdir}/CNVs/TXT/", mode: 'copy'
+  publishDir "${params.outdir}/CNVs/TXT/Filtered/", mode: 'copy', pattern: '*.txt'
+  publishDir "${params.outdir}/CNVs/log/", mode: 'copy', pattern: '*.log'
 
   input:
-  set sampID, file(combCall) from ch_final_calls
+  set sampID, file(combCall), val(sex) from ch_final_calls_sex
   file(gapsRef) from gapsRef
 
   output:
   set sampID, file("${sampID}.ERDS_CNVnator_CNVs.filtered.txt") into filtered_calls, ch_cnvs_mosaichunter
+  file("${sampID}.ERDS_CNVnator_CNVs.filtered.log") into filtered_log
 
   """
-  filterCNVs.R $combCall $gapsRef ${sampID}.ERDS_CNVnator_CNVs.filtered.txt
+  filterCNVs.R $combCall $sex $gapsRef ${sampID}.ERDS_CNVnator_CNVs.filtered.txt
   """
 }
 
@@ -528,9 +544,6 @@ process annotateVCF {
   """
 
 }
-
-
-
 
 
 /*
@@ -629,33 +642,34 @@ process mergeBeds {
 
 }
 
-ch_input_mosaichunter_input = ch_input_mosaichunter.join(ch_merged_bed)
+ch_input_mosaichunter_input = ch_input_mosaichunter.join(ch_sex_mosaics).join(ch_merged_bed)
 
 process runMosaicHunter {
 
   tag "$sampID"
   label 'process_medium'
-  publishDir "${params.outdir}/Mosaics/SNVs/TXT/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
-  publishDir "${params.outdir}/Mosaics/SNVs/logs/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
+  publishDir "${params.outdir}/Mosaics/SNVs/TXT/unfilteredVariants/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
+  publishDir "${params.outdir}/Mosaics/SNVs/logs/runMosaicHunter/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
 
   input:
-  tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx), file(bed) from ch_input_mosaichunter_input
-  file(fasta) from ch_fasta_for_mosaichunter
-  val(conf) from params.mosaichunter_config
+  tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx), val(sex), file(bed) from ch_input_mosaichunter_input
+  file(fasta) from ch_fasta_for_mosaichunter.collect()
+  file(conf) from mosaichunter_config
   val(mode) from params.mosaichunter_mode
   file(gapsRef) from gapsRef
 
 
   output:
-  tuple sampID, file("final.passed.tsv") into ch_mosaichunter_out
+  tuple sampID, file("final.passed.tsv") into ch_mosaichunter_out, ch_mosaichunter_out2
   file("stdout*.log")
 
   script:
   """
-  java -jar ~/MosaicHunter/build/mosaichunter.jar $conf \
+  java -jar ~/MosaicHunter/build/mosaichunter.jar -C $conf \
   -P input_file=$bam \
   -P reference_file=$fasta \
   -P output_dir=./ \
+  -P mosaic_filter.sex=$sex \
   -P mosaic_filter.mode=$mode \
   -P repetitive_region_filter.bed_file=$gapsRef \
   -P indel_region_filter.bed_file=$bed
@@ -663,7 +677,94 @@ process runMosaicHunter {
 
 }
 
-process convertAvinput {
+
+process mosaicHunterVCF {
+
+  tag "$sampID"
+
+  publishDir "${params.outdir}/Mosaics/SNVs/VCF/",  mode: 'copy'
+
+
+  input:
+  tuple sampID, file(tsv) from ch_mosaichunter_out2
+
+  output:
+  tuple sampID, file("${sampID}.MosaicHunter.MosaicSNVs.vcf.gz") into ch_mosaichunter_vcf
+
+  script:
+  """
+  ## Make Header
+echo "##fileformat=VCFv4.3
+##fileDate=$date
+##source=MosaicHunter
+##FORMAT=<ID=GT,Number=1,Type=String,Description='Genotype'>
+##FORMAT=<ID=AF,Number=1,Type=Float,Description='Frequency of alternate allele'>
+##FORMAT=<ID=DP,Number=1,Type=Float,Description='Read depth'>
+##FORMAT=<ID=AD,Number=.,Type=Integer,Description='Allelic depths for the ref and alt alleles in the order listed.'>
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t$sampID" > ${sampID}.MosaicHunter.MosaicSNVs.vcf
+
+## Add calls
+awk  '{OFS = "\t"}
+{if (\$3=\$7)
+      print \$1, \$2, ".", \$3, \$9, ".", "PASS", ".", "GT:AF:DP:AD", "0/1:"\$10/\$4":"\$4":"\$8","\$10;
+else
+    print \$1, \$2, ".", \$3, \$7, ".", "PASS", ".", "GT:AF:DP:AD", "0/1:"\$8/\$4":"\$4":"\$10","\$8;
+   }'    $tsv >> ${sampID}.MosaicHunter.MosaicSNVs.vcf
+   sed -i 's/:-/:\\./g' ${sampID}.MosaicHunter.MosaicSNVs.vcf ## Change empty values to .
+   sed -i 's/\\x27/\\x22/g' ${sampID}.MosaicHunter.MosaicSNVs.vcf ## Change ' for "
+   bgzip ${sampID}.MosaicHunter.MosaicSNVs.vcf
+  """
+}
+
+process indexVCF {
+
+  tag "$sampID"
+
+  input:
+  tuple sampID, file(vcf) from ch_mosaichunter_vcf
+
+  output:
+  tuple file(vcf), file("${vcf}.tbi") into ch_mosaichunter_tbi
+
+  script:
+  """
+  tabix -p vcf $vcf
+  """
+}
+
+
+process mergeVCFs {
+
+  input:
+  file(vcf) from ch_mosaichunter_tbi.collect()
+
+  output:
+  file("merged.MosaicHunter.MosaicSNVs.vcf.gz") into ch_mosaichunter_vcf_merge
+
+  script:
+  """
+  bcftools merge *.gz -m none -o merged.MosaicHunter.MosaicSNVs.vcf.gz -O z
+  """
+}
+
+process selectNonPrivateVariants {
+
+  input:
+  file(vcf) from ch_mosaichunter_vcf_merge
+
+  output:
+  file("nonprivate.MosaicHunter.MosaicSNVs.vcf.gz") into ch_mosaichunter_vcf_nonprivate
+
+  script:
+  """
+  bcftools view -i 'N_SAMPLES-N_MISSING>1'  $vcf -o nonprivate.MosaicHunter.MosaicSNVs.vcf.gz -O z
+  """
+}
+
+
+
+
+process convertAnnovarinput {
 
   tag "$sampID"
 
@@ -675,7 +776,12 @@ process convertAvinput {
 
   script:
   """
-  awk  '{OFS = "\t"}!/^#/{print \$1, \$2, \$2, \$3, \$3=\$7?\$9:\$7, \$4, \$7, \$8, \$9, \$10}' $tsv > ${sampID}.avinput.txt
+awk  '{OFS = "\t"}
+{if (\$3=\$7)
+      print \$1, \$2, \$2, \$3, \$9, \$10/\$4, \$4, \$8"/"\$10;
+else
+    print \$1, \$2,  \$2, \$3, \$7,  \$8/\$4, \$4, \$10"/"\$8;
+   }'    $tsv > ${sampID}.avinput.txt
   """
 
 }
@@ -683,22 +789,53 @@ process convertAvinput {
 process annotateSNPs {
 
   tag "$sampID"
-//  publishDir "${params.outdir}/Mosaics/SNVs/TXT/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
-//  publishDir "${params.outdir}/Mosaics/SNVs/logs/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
 
   input:
   tuple sampID, file(avinput) from ch_mosaichunter_avinput
   file(annovar)
   file(annovarVar)
   file(annovarCod)
+  file(annovarXref)
   file(annovarFold)
 
   output:
+  tuple sampID, file("${sampID}.hg19_multianno.txt") into ch_mosaichunter_annot
 
+  script:
   """
-  perl $annovar $avinput $annovarFold -buildver hg19 -out myanno -remove -protocol refGene,cytoBand,genomicSuperDups,gnomad211_exome,gnomad211_genome,avsnp150,kaviar_20150923 -operation gx,r,f,f -nastring . -csvout -polish
+  perl $annovar $avinput $annovarFold -buildver hg19 -out ${sampID} -remove \
+  --xref $annovarXref \
+  -protocol refGene,cytoBand,genomicSuperDups,gnomad211_exome,gnomad211_genome,avsnp150,kaviar_20150923,clinvar_20200316,dbnsfp41a \
+  -operation gx,r,r,f,f,f,f,f,f -nastring . --otherinfo
   """
 }
+
+
+process prioritizeSNVs {
+
+  tag "$sampID"
+  publishDir "${params.outdir}/Mosaics/SNVs/XLSX/", pattern: '*.xlsx', mode: 'copy'
+  publishDir "${params.outdir}/Mosaics/SNVs/logs/prioritization/", pattern: '*.log', mode: 'copy'
+  publishDir "${params.outdir}/Mosaics/SNVs/TXT/filteredVariants/", pattern: '*.txt', mode: 'copy'
+
+  input:
+  tuple sampID, file(annovar) from ch_mosaichunter_annot
+  file(omim)
+  file(omim_map)
+  file(nonprivate) from ch_mosaichunter_vcf_nonprivate
+
+
+  output:
+  file("*.txt")
+  file("*.log")
+  file("*.xlsx")
+
+  script:
+  """
+  prioritizeSNVs.R $annovar $omim $omim_map $nonprivate ${sampID}.MosaicHunter.MosaicSNVs.Prioritization
+  """
+}
+
 
 
 // /*
