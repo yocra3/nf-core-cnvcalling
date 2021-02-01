@@ -15,14 +15,14 @@ ENV PATH /opt/conda/envs/nf-core-cnvcalling/bin:$PATH
 RUN conda env export --name nf-core-cnvcalling > nf-core-cnvcalling.yml
 
 ## TCAG pipeline
-RUN cd ~ && git clone https://github.com/bjtrost/TCAG-WGS-CNV-workflow.git
+RUN cd /opt/ && git clone https://github.com/bjtrost/TCAG-WGS-CNV-workflow.git
 
 ## ERDS
-RUN cd ~ && git clone https://github.com/igm-team/ERDS.git && \
+RUN cd /opt/ && git clone https://github.com/igm-team/ERDS.git && \
     cd ERDS/erds_tcag/src && make
 
 ## MosaicHunter
-RUN cd ~ && git clone https://github.com/zzhang526/MosaicHunter.git
+RUN cd /opt/ && git clone https://github.com/zzhang526/MosaicHunter.git
 
 # setup aliases
-ENV PATH $PATH:/root/ERDS/erds_tcag/src/
+ENV PATH $PATH:/opt/ERDS/erds_tcag/src/

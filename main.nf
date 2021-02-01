@@ -319,7 +319,7 @@ if (compressedReference) {
 
     """
     mkdir out
-    python2 /root/TCAG-WGS-CNV-workflow/format_cnvnator_results.py ${sampID}.cnvnator.txt out/${sampID}.cnvnator.txt
+    python2 /opt/TCAG-WGS-CNV-workflow/format_cnvnator_results.py ${sampID}.cnvnator.txt out/${sampID}.cnvnator.txt
     """
 
   }
@@ -348,7 +348,7 @@ if (compressedReference) {
     grep -v "GL" $cnvnatorCall > calls/$cnvnatorCall
 
     mkdir merged
-    python2 /root/TCAG-WGS-CNV-workflow/merge_cnvnator_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
+    python2 /opt/TCAG-WGS-CNV-workflow/merge_cnvnator_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
     """
 
   }
@@ -386,7 +386,7 @@ if (compressedReference) {
      output:
      set sampID, file("${sampID}.erds.txt") into ch_ERDS_formatted_calls
      """
-     python2 /root/TCAG-WGS-CNV-workflow/format_erds_results.py erds.vcf ${sampID}.erds.txt
+     python2 /opt/TCAG-WGS-CNV-workflow/format_erds_results.py erds.vcf ${sampID}.erds.txt
      """
 
    }
@@ -412,7 +412,7 @@ if (compressedReference) {
 
 
      mkdir merged
-     python2 /root/TCAG-WGS-CNV-workflow/merge_erds_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
+     python2 /opt/TCAG-WGS-CNV-workflow/merge_erds_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
      """
    }
 
@@ -432,7 +432,7 @@ process combineCalls {
   set sampID, file("${sampID}.ERDS_CNVnator_CNVs.raw.txt") into ch_final_calls
 
   """
-  python2 /root/TCAG-WGS-CNV-workflow/add_features.py -i $cnvnatorCall -a $erdsCall -o ${sampID}.ERDS_CNVnator_CNVs.raw.txt -s $sampID -c 0 -p reciprocal
+  python2 /opt/TCAG-WGS-CNV-workflow/add_features.py -i $cnvnatorCall -a $erdsCall -o ${sampID}.ERDS_CNVnator_CNVs.raw.txt -s $sampID -c 0 -p reciprocal
   """
 }
 
@@ -665,7 +665,7 @@ process runMosaicHunter {
 
   script:
   """
-  java -jar ~/MosaicHunter/build/mosaichunter.jar -C $conf \
+  java -jar /opt/MosaicHunter/build/mosaichunter.jar -C $conf \
   -P input_file=$bam \
   -P reference_file=$fasta \
   -P output_dir=./ \
