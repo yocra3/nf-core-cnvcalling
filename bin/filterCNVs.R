@@ -24,18 +24,13 @@ cnv <- read.delim(cnvFile, as.is = TRUE)
 LCRs <- read.table(LCRFile, comment.char = "", header = FALSE, as.is = TRUE)
 
 ## Select common CNVs between ERDS and CNVnator
-cnv.com1 <- subset(cnv, erds_fraction != "-" & erds_fraction != "#" & cnvn_fraction != "-" & cnv_type_conflict == "-")
-## Reciprocal overlap > 50%
-cnv.com <- subset(cnv.com1, erds_fraction > 0.50 & cnvn_fraction > 0.50)
-
-## Filter CNVs with q0 > 0.5
-cnv.filt <- subset(cnv.com, !(q0 != "-" & as.numeric(q0) > 0.5))
+cnv.com <- subset(cnv, erds_fraction != "-" & erds_fraction != "#" & cnvn_fraction != "-" & cnv_type_conflict == "-")
 
 ## Filter Y CNVs in females
 if (sex == "F"){
-  cnv.sex <- subset(cnv.filt, m != "Y")
+  cnv.sex <- subset(cnv.com, m != "Y")
 } else {
-  cnv.sex <- cnv.filt
+  cnv.sex <- cnv.com
 }
 
 ## Remove CNVs overlapping > 70% with low complexity regions
@@ -66,10 +61,9 @@ write.table(cnv.sing, file = outFile, quote = FALSE, row.names = FALSE, sep = "\
 sumTable <- data.frame(Description = c(
   "Initial Number CNVs",
   "Common CNVs CNVnator - ERDS",
-  "Good quality (q0 > 0.5)",
   "CNVs in Y chromosome in females",
   "Outside Segmental Duplications"),
-  Number = c(nrow(cnv), nrow(cnv.com), nrow(cnv.filt), nrow(cnv.sex), nrow(cnv.sing)))
+  Number = c(nrow(cnv), nrow(cnv.com), nrow(cnv.sex), nrow(cnv.sing)))
 sumTable$Proportion <- round(sumTable$Number/nrow(cnv)*100, 2)
 
 write.table(sumTable, file = gsub("txt", "log", outFile), quote = FALSE, row.names = FALSE, sep = "\t")
