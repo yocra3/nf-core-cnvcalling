@@ -15,7 +15,6 @@ process CONVERT_TCAGCNV_VCF {
   """
   ## Make Header
 echo "##fileformat=VCFv4.3
-##fileDate=$date
 ##source=CNVnator
 ##INFO=<ID=END,Number=1,Type=Integer,Description='End position of the variant described in this record'>
 ##INFO=<ID=SVLEN,Number=1,Type=Integer,Description='Difference in length between REF and ALT alleles'>

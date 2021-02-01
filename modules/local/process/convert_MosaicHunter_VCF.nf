@@ -15,7 +15,6 @@ process CONVERT_MOSAICHUNTER_VCF {
   """
   ## Make Header
 echo "##fileformat=VCFv4.3
-##fileDate=$date
 ##source=MosaicHunter
 ##FORMAT=<ID=GT,Number=1,Type=String,Description='Genotype'>
 ##FORMAT=<ID=AF,Number=1,Type=Float,Description='Frequency of alternate allele'>
