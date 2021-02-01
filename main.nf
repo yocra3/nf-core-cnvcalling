@@ -9,6 +9,8 @@
 ----------------------------------------------------------------------------------------
 */
 
+nextflow.enable.dsl = 2
+
 def helpMessage() {
     // TODO nf-core: Add to this help message with new command line parameters
     log.info nfcoreHeader()
@@ -87,13 +89,13 @@ if (params.inputTable) {
             .map { row -> [ row[0], file(row[1], checkIfExists: true), file(row[1] + ".bai", checkIfExists: true) ,
              file(row[2], checkIfExists: true),  file(row[2] + ".tbi", checkIfExists: true) ] }
             .ifEmpty { exit 1, "params.inputTable was empty - no input files supplied" }
-            .into { ch_input_cnvnator; ch_input_erds; ch_input_mosaichunter; ch_input_indels; ch_input_mrmosaic }
+            .set { ch_input }
 
             Channel
               .fromPath(params.inputTable)
               .splitCsv(sep: "\t")
               .map { row -> [ row[0], row[3] ]}
-              .into { ch_sex_CNVs;  ch_sex_mosaics}
+              .set { ch_sex }
 
 } else { exit 1, "--inputTable should be text file with the sample id, a bam file and a vcf file should be provided." }
 
@@ -106,7 +108,7 @@ if (params.fasta && !params.skipAlignment) {
   } else {
       Channel.fromPath(params.fasta, checkIfExists: true)
         .ifEmpty { exit 1, "Genome fasta file not found: ${params.fasta}" }
-        .into { ch_fasta_for_dict; ch_fasta_for_cnvnator; ch_fasta_for_mosaichunter }
+        .set { ch_fasta }
   }
 }
 
@@ -188,30 +190,7 @@ annovarFold = file("${params.annovarFold}")
 //
 compressedReference = hasExtension(params.fasta, 'gz')
 
-if (compressedReference) {
-  // TODO nf-core: Simplificar parametros
 
-  // This complex logic is to prevent accessing the genome_fasta_gz variable if
-  // necessary indices for STAR, HiSAT2, Salmon already exist, or if
-  // params.transcript_fasta is provided as then the transcript sequences don't
-  // need to be extracted.
-  process gunzip_genome_fasta {
-    tag "$gz"
-    publishDir path: { params.saveReference ? "${params.outdir}/reference_genome" : params.outdir },
-    saveAs: { params.saveReference ? it : null }, mode: 'copy'
-
-    input:
-    file gz from genome_fasta_gz
-
-    output:
-    file "${gz.baseName}" into ch_fasta_for_dict, ch_fasta_for_cnvnator
-
-    script:
-    """
-    gunzip -k --verbose --stdout --force ${gz} > ${gz.baseName}
-    """
-  }
-}
 //
 //
 // /*
@@ -240,292 +219,219 @@ if (compressedReference) {
 // }
 //
 
-/*
- * Pre-process: Create fasta dictionary
- */
- process createFastaDict {
+include { GUNZIP_GENOME_FASTA } from './modules/local/process/gunzip_genome_fasta.nf'
+include { CREATE_FASTA_INDEX } from './modules/local/process/create_FASTA_index.nf'
+include { CREATE_FASTA_DICT } from './modules/local/process/create_FASTA_dict.nf'
+include { SPLIT_FASTA } from './modules/local/process/split_FASTA.nf'
+include { RUN_CNVNATOR } from './modules/local/process/run_CNVNator.nf'
+include { FORMAT_CNVNATOR } from './modules/local/process/format_CNVNator.nf'
+include { CLUSTER_CNVNATOR } from './modules/local/process/cluster_CNVNator.nf'
+include { RUN_ERDS } from './modules/local/process/run_ERDS.nf'
+include { FORMAT_ERDS } from './modules/local/process/format_ERDS.nf'
+include { CLUSTER_ERDS } from './modules/local/process/cluster_ERDS.nf'
+include { COMBINE_CNV_CALLS } from './modules/local/process/combine_cnv_calls.nf'
+include { FILTER_CNV_CALLS } from './modules/local/process/filter_cnv_calls.nf'
+include { CONVERT_TCAGCNV_VCF } from './modules/local/process/convert_TCAGcnv_VCF.nf'
+include { BCFTOOLS_REHEADER_FASTA } from './modules/local/process/bcftools_reheader_fasta.nf'
+include { BCFTOOLS_SORT_COMPRESS } from './modules/local/process/bcftools_sort_compress.nf'
+include { TABIX_INDEX_VCF } from './modules/local/process/tabix_index_vcf.nf'
+include { ANNOTATE_CNV_VCF } from './modules/local/process/annotate_CNV_VCF.nf'
+include { BGZIP_COMPRESS_VCF } from './modules/local/process/bgzip_compress_vcf.nf'
+include { PRIORITIZE_CNVS } from './modules/local/process/prioritize_CNVs.nf'
+include { BCFTOOLS_SELECT_INDELS } from './modules/local/process/bcftools_select_indels.nf'
+include { VCF_INDELS_TO_BED } from './modules/local/process/VCF_indels_to_bed.nf'
+include { TCAG_CNVS_TO_BED } from './modules/local/process/TCAG_CNVs_to_bed.nf'
+include { MERGE_BED } from './modules/local/process/merge_bed.nf'
+include { RUN_MOSAICHUNTER } from './modules/local/process/run_MosaicHunter.nf'
+include { CONVERT_MOSAICHUNTER_VCF } from './modules/local/process/convert_MosaicHunter_VCF.nf'
+include { BCFTOOLS_MERGE_VCFS } from './modules/local/process/bcftools_merge_vcfs.nf'
+include { SELECT_NONPRIVATE_VARIANTS } from './modules/local/process/select_nonprivate_variants.nf'
+include { CONVERT_MOSAICHUNTER_ANNOVAR } from './modules/local/process/convert_MosaicHunter_Annovar.nf'
+include { ANNOTATE_SNVS_ANNOVAR } from './modules/local/process/annotate_SNVs_Annovar.nf'
+include { PRIORITIZE_SNVS } from './modules/local/process/prioritize_SNVs.nf'
 
-   input:
-   file("ref.fasta") from ch_fasta_for_dict
 
-   output:
-   set file("ref.fasta"), file("ref.fasta.fai"), file("ref.dict") into ch_fasta_for_ERDS, ch_fastadict_VCF
+workflow PREPROCESS {
 
-   """
-   samtools faidx ref.fasta
-   gatk CreateSequenceDictionary -R ref.fasta
-   """
- }
+  take:
+  ch_fasta
 
- /*
-  * Pre-process:  Split fasta in chromosomes
-  */
- process splitFasta {
+  main:
+  CREATE_FASTA_INDEX(ch_fasta)
+  CREATE_FASTA_DICT(CREATE_FASTA_INDEX.out)
+  SPLIT_FASTA(ch_fasta)
 
-   input:
-   file(fasta) from ch_fasta_for_cnvnator
+  emit:
+  idx = CREATE_FASTA_INDEX.out
+  dict = CREATE_FASTA_DICT.out
+  split = SPLIT_FASTA.out
+}
 
-   output:
-   file("*.fa") into ch_fastaChr_cnvnator
+workflow CNVNATOR {
 
-   """
-   csplit -s -z $fasta '/>/' '{*}'
-   for i in xx*
-   do
-     n=\$(sed 's/>// ; s/ .*// ; 1q' "\$i") ; \
-     mv "\$i" "\$n.fa" ; \
-   done
-   """
- }
+  take:
+  ch_input
+  fasta
+  genome
+  binSize
+  gapsRef
 
- /*
-  * STEP 4 - CNV calling with CNVnator
-  */
-  process runCNVnator {
-    tag "$sampID"
+  main:
+  RUN_CNVNATOR(ch_input, fasta, genome, binSize)
+  FORMAT_CNVNATOR(RUN_CNVNATOR.out)
+  CLUSTER_CNVNATOR(FORMAT_CNVNATOR.out, gapsRef)
 
-    label 'process_medium'
+  emit:
+  CLUSTER_CNVNATOR.out
+}
 
-    input:
-    tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx) from ch_input_cnvnator
-    file(fasta) from ch_fastaChr_cnvnator.collect()
-    val(genome) from params.genome
-    val(bin_size) from params.binSize
+workflow ERDS {
 
-    output:
-    set sampID, file("${sampID}.txt") into ch_cnvnator_calls
+  take:
+  ch_input
+  fasta
+  gapsRef
 
-    """
-    cnvnator -genome $genome -root ${sampID}.root -tree $bam
-    cnvnator -genome $genome -root ${sampID}.root -his $bin_size
-    cnvnator -root "${sampID}.root" -stat $bin_size
-    cnvnator -root "${sampID}.root" -partition $bin_size -ngc
-    cnvnator -root "${sampID}.root" -call $bin_size -ngc > ${sampID}.txt
-    """
+  main:
+  RUN_ERDS(ch_input, fasta)
+  FORMAT_ERDS(RUN_ERDS.out)
+  CLUSTER_ERDS(FORMAT_ERDS.out, gapsRef)
 
+  emit:
+  CLUSTER_ERDS.out
+}
+
+workflow FILTER_CNVS {
+
+  take:
+  ch_input
+  gapsRef
+  fasta
+
+  main:
+  FILTER_CNV_CALLS(ch_input, gapsRef)
+  CONVERT_TCAGCNV_VCF(FILTER_CNV_CALLS.out.txt)
+  BCFTOOLS_REHEADER_FASTA(CONVERT_TCAGCNV_VCF.out, fasta)
+  BCFTOOLS_SORT_COMPRESS(BCFTOOLS_REHEADER_FASTA.out)
+  TABIX_INDEX_VCF(BCFTOOLS_SORT_COMPRESS.out)
+
+  emit:
+  txt = FILTER_CNV_CALLS.out.txt
+  vcf = TABIX_INDEX_VCF.out
+}
+
+workflow ANNOTATE_CNVS {
+
+    take:
+    vcf
+    commonCNV
+    clinvarCNV
+    gtfRef
+    omim
+
+    main:
+    ANNOTATE_CNV_VCF(vcf, commonCNV, clinvarCNV, gtfRef, omim)
+    BGZIP_COMPRESS_VCF(ANNOTATE_CNV_VCF.out)
+    TABIX_INDEX_VCF(BGZIP_COMPRESS_VCF.out)
+    PRIORITIZE_CNVS(TABIX_INDEX_VCF.out)
+
+    emit:
+    PRIORITIZE_CNVS.out
+
+}
+
+
+workflow MOSAICHUNTER {
+
+  take:
+  ch_input
+  cnvs
+  ch_sex
+  fasta
+  mosaichunter_config
+  mosaichunter_mode
+  gapsRef
+
+  main:
+  BCFTOOLS_SELECT_INDELS(ch_input)
+  VCF_INDELS_TO_BED(BCFTOOLS_SELECT_INDELS.out)
+  TCAG_CNVS_TO_BED(cnvs)
+
+  ch_comb = VCF_INDELS_TO_BED.out.join(TCAG_CNVS_TO_BED.out)
+  MERGE_BED(ch_comb)
+  ch_mosaichunter_input = ch_input.join(ch_sex).join(MERGE_BED.out)
+
+  // MosaicHunter
+  RUN_MOSAICHUNTER(ch_mosaichunter_input, fasta, mosaichunter_config, mosaichunter_mode, gapsRef)
+  CONVERT_MOSAICHUNTER_VCF(RUN_MOSAICHUNTER.out.tsv)
+  BGZIP_COMPRESS_VCF(CONVERT_MOSAICHUNTER_VCF.out)
+  TABIX_INDEX_VCF(BGZIP_COMPRESS_VCF.out)
+
+  emit:
+  txt = RUN_MOSAICHUNTER.out.tsv
+  vcf = TABIX_INDEX_VCF.out
+}
+
+workflow FILTER_MOSAIC_SNVS {
+
+  take:
+  vcf
+  mosaic_res
+  annovar
+  annovarVar
+  annovarCod
+  annovarXref
+  annovarFold
+  omim
+  omim_map
+
+  main:
+  BCFTOOLS_MERGE_VCFS(vcf)
+  SELECT_NONPRIVATE_VARIANTS(BCFTOOLS_MERGE_VCFS.out)
+
+  CONVERT_MOSAICHUNTER_ANNOVAR(mosaic_res)
+  ANNOTATE_SNVS_ANNOVAR(CONVERT_MOSAICHUNTER_ANNOVAR.out, annovar, annovarVar, annovarCod, annovarXref, annovarFold)
+  PRIORITIZE_SNVS(ANNOTATE_SNVS_ANNOVAR.out, omim, omim_map, SELECT_NONPRIVATE_VARIANTS.out)
+
+}
+
+
+workflow  {
+
+  if (compressedReference) {
+    GUNZIP_GENOME_FASTA(genome_fasta_gz)
+    ch_fasta = GUNZIP_GENOME_FASTA.out
   }
 
-  /*
-  * STEP 4b - Format CNVnator
-  */
-  process formatCNVNnator {
-    tag "$sampID"
+  PREPROCESS(ch_fasta)
 
-    input:
-    set sampID, file("${sampID}.cnvnator.txt") from ch_cnvnator_calls
+  // Run CNVnator and ERDS
+  CNVNATOR(ch_input, PREPROCESS.out.split.collect(), params.genome, params.binSize, gapsRef)
+  ERDS(ch_input, PREPROCESS.out.dict.collect(), gapsRef)
 
-    output:
-    set sampID, file("out/${sampID}.cnvnator.txt") into ch_cnvnator_formatcalls
+  // Combine calls
+  ch_combined_calls = CNVNATOR.out.join(ERDS.out)
+  COMBINE_CNV_CALLS(ch_combined_calls)
 
-    """
-    mkdir out
-    python2 /opt/TCAG-WGS-CNV-workflow/format_cnvnator_results.py ${sampID}.cnvnator.txt out/${sampID}.cnvnator.txt
-    """
-
-  }
+  // Filter and prioritize CNVs
+  ch_final_calls_sex = COMBINE_CNV_CALLS.out.join(ch_sex)
+  FILTER_CNVS(ch_final_calls_sex, gapsRef, PREPROCESS.out.idx.collect())
+  ANNOTATE_CNVS(FILTER_CNVS.out.vcf, commonCNV, clinvarCNV, gtfRef, omim)
 
 
-  /*
-  * STEP 4c - Cluster CNVnator calls
-  */
-  process clusterCNVnator {
+  // MosaicHunter
+  MOSAICHUNTER(ch_input, FILTER_CNVS.out.txt, ch_sex, ch_fasta.collect(), mosaichunter_config, params.mosaichunter_mode, gapsRef)
+  FILTER_MOSAIC_SNVS(MOSAICHUNTER.out.vcf.collect().filter( File ), MOSAICHUNTER.out.txt, annovar, annovarVar, annovarCod, annovarXref, annovarFold, omim, omim_map)
 
-    tag "$sampID"
-
-    label 'process_low'
-
-    input:
-    set sampID, file(cnvnatorCall) from ch_cnvnator_formatcalls
-    file(gapsRef) from gapsRef
-
-    output:
-    set sampID, file("merged/${sampID}.cnvnator.txt.cluster.txt") into ch_cnvnator_clustercalls
-
-    """
-    mkdir calls
-
-    echo $cnvnatorCall"\t"$sampID > ids.map
-    grep -v "GL" $cnvnatorCall > calls/$cnvnatorCall
-
-    mkdir merged
-    python2 /opt/TCAG-WGS-CNV-workflow/merge_cnvnator_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
-    """
-
-  }
-
-  /*
-   * STEP 5 - CNV calling with ERDS
-   */
-   process runERDS {
-     tag "$sampID"
-
-     label 'process_medium'
-
-     input:
-     tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx) from ch_input_erds
-     tuple file(fasta), file(fai), file(dict) from ch_fasta_for_ERDS.collect()
-
-     output:
-     set sampID, file("${sampID}/${sampID}.erds.vcf") into ch_ERDS_calls
-
-     """
-     erds_pipeline.pl -b $bam -v $vcf -o ./$sampID -r $fasta -n $sampID --samtools /opt/conda/envs/nf-core-cnvcalling/bin/samtools
-     """
-
-   }
-
-   /*
-   * STEP 5b - Format ERDS
-   */
-   process formatERDS {
-     tag "$sampID"
-
-     input:
-     set sampID, file("erds.vcf") from ch_ERDS_calls
-
-     output:
-     set sampID, file("${sampID}.erds.txt") into ch_ERDS_formatted_calls
-     """
-     python2 /opt/TCAG-WGS-CNV-workflow/format_erds_results.py erds.vcf ${sampID}.erds.txt
-     """
-
-   }
-
-   /*
-   * STEP 5c - Cluster ERDS calls
-   */
-   process clusterERDS {
-     tag "$sampID"
-
-     input:
-     set sampID, file(erdsCall) from ch_ERDS_formatted_calls
-     file(gapsRef) from gapsRef
-
-     output:
-     set sampID, file("merged/${sampID}.erds.txt.cluster.txt") into ch_erds_clustercalls
-
-     """
-     mkdir calls
-
-     echo $erdsCall"\t"$sampID > ids.map
-     grep -v "GL" $erdsCall > calls/$erdsCall
-
-
-     mkdir merged
-     python2 /opt/TCAG-WGS-CNV-workflow/merge_erds_results.py -i ./calls/ -a ids.map -o ./merged/ -g $gapsRef
-     """
-   }
-
-ch_combined_calls = ch_cnvnator_clustercalls.join(ch_erds_clustercalls)
-
-/*
-* STEP 5d - Combine CNVnator and ERDS calls
-*/
-process combineCalls {
-  tag "$sampID"
-  publishDir "${params.outdir}/CNVs/TXT/Raw/", mode: 'copy'
-
-  input:
-  set sampID, file(cnvnatorCall), file(erdsCall) from ch_combined_calls
-
-  output:
-  set sampID, file("${sampID}.ERDS_CNVnator_CNVs.raw.txt") into ch_final_calls
-
-  """
-  python2 /opt/TCAG-WGS-CNV-workflow/add_features.py -i $cnvnatorCall -a $erdsCall -o ${sampID}.ERDS_CNVnator_CNVs.raw.txt -s $sampID -c 0 -p reciprocal
-  """
-}
-
-ch_final_calls_sex = ch_final_calls.join(ch_sex_CNVs)
-
-/*
-* STEP 5e - Filter CNV calls
-* - Select common CNVs between CNVnator and erds (reciprocal overlap > 50%)
-* - Discard CNVs with CNVnator q0 > 0.5
-* - Remove CNVs overlapping > 70% with low complexity regions
-*/
-process filterCalls {
-  tag "$sampID"
-
-  publishDir "${params.outdir}/CNVs/TXT/Filtered/", mode: 'copy', pattern: '*.txt'
-  publishDir "${params.outdir}/CNVs/log/", mode: 'copy', pattern: '*.log'
-
-  input:
-  set sampID, file(combCall), val(sex) from ch_final_calls_sex
-  file(gapsRef) from gapsRef
-
-  output:
-  set sampID, file("${sampID}.ERDS_CNVnator_CNVs.filtered.txt") into filtered_calls, ch_cnvs_mosaichunter
-  file("${sampID}.ERDS_CNVnator_CNVs.filtered.log") into filtered_log
-
-  """
-  filterCNVs.R $combCall $sex $gapsRef ${sampID}.ERDS_CNVnator_CNVs.filtered.txt
-  """
-}
-
-// Convert CNVnator output to VCF
-process convert2VCF {
-
-  tag "$sampID"
-
-  input:
-  set sampID, file(merged) from filtered_calls
-
-  output:
-  tuple sampID, file("${sampID}.CNVs.vcf") into vcfs
-
-  """
-  ## Make Header
-echo "##fileformat=VCFv4.3
-##fileDate=$date
-##source=CNVnator
-##INFO=<ID=END,Number=1,Type=Integer,Description='End position of the variant described in this record'>
-##INFO=<ID=SVLEN,Number=1,Type=Integer,Description='Difference in length between REF and ALT alleles'>
-##INFO=<ID=SVTYPE,Number=1,Type=String,Description='Type of structural variant'>
-##FORMAT=<ID=GT,Number=1,Type=String,Description='Genotype'>
-##FORMAT=<ID=NRD,Number=1,Type=String,Description='Normalized Read depth'>
-##FORMAT=<ID=E,Number=1,Type=Float,Description='e-val2'>
-##FORMAT=<ID=q0,Number=1,Type=Float,Description='q0'>
-##FORMAT=<ID=NCNV,Number=1,Type=Integer,Description='Number of CNVs'>
-##FORMAT=<ID=LCNVS,Number=1,Type=Integer,Description='Length of CNVS'>
-##FORMAT=<ID=LG,Number=1,Type=Integer,Description='Length of gaps'>
-##FORMAT=<ID=PG,Number=1,Type=Float,Description='Proportion of Gaps'>
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t$sampID" > ${sampID}.CNVs.vcf
-
-## Add calls
-tail -n +2 $merged | awk  '{OFS = "\t"}!/^#/{print \$2, \$3, ".", "N", ".", "<"\$5">", "PASS", "SVTYPE="\$5";END="\$4";SVLEN="\$6,\
-   "GT:NRD:E:q0:NCNV:LCNVS:LG:PG", "1/0:"\$7":"\$8":"\$9":"\$10":"\$11":"\$12":"\$13  }' - \
-   >> ${sampID}.CNVs.vcf
-   sed -i 's/:-/:\\./g' ${sampID}.CNVs.vcf ## Change empty values to .
-   sed -i 's/\\x27/\\x22/g' ${sampID}.CNVs.vcf ## Change ' for "
-  """
-}
-
-// Compress, sort and index vcf
-process prepareVCF {
-
-  tag "$sampID"
-
-  input:
-  tuple sampID, file(vcf) from vcfs
-  tuple file(fasta), file(fastaidx), file(dict) from ch_fastadict_VCF.collect()
-
-  output:
-  tuple sampID, file("${vcf}.gz"), file("${vcf}.gz.tbi")  into sortVCF
-
-  """
-  bcftools reheader -f $fastaidx -o header.vcf $vcf
-  bcftools sort -o ${vcf}.gz -O z  header.vcf
-  tabix -p vcf ${vcf}.gz
-  """
 }
 
 
-// Add annotation to CNVs
-process annotateVCF {
+
+/* NOTE: The publishDir for the following process should be included in a subworkflow
+process ANNOTATE_CNV_VCF {
 
   tag "$sampID"
-  publishDir "${params.outdir}/CNVs/VCF/", mode: 'copy'
+  //publishDir "${params.outdir}/CNVs/VCF/", mode: 'copy'
 
   input:
   set sampID, file(vcf), file(vcftbi) from sortVCF
@@ -545,140 +451,7 @@ process annotateVCF {
 
 }
 
-
-/*
-* Prioritize variants:
-* - Remove CNVs with overlap > 20% with commonCNVs
-* - Select CNVs with overlap > 80% pathogenic variants (subset1)
-* - Select CNVs overlapping exons in OMIM genes (subset2)
-* - Select CNVs overlapping exons in GENCODE genes (subset3)
-*/
-process prioritizeCNVs {
-
-  tag "$sampID"
-  publishDir "${params.outdir}/CNVs/XLSX/", mode: 'copy'
-
-
-  input:
-  set sampID, file(vcf), file(vcftbi) from annotatedVCF
-
-  output:
-  file("${sampID}.ERDS_CNVnator_CNVs.Prioritization.xlsx") into priorCNV
-
-  script:
-  """
-  prioritizeCNVs.R $vcf ${sampID}.ERDS_CNVnator_CNVs.Prioritization.xlsx
-  """
-
-}
-
-/*
- *
- */
- process prepareINDELs {
-   tag "$sampID"
-
-   input:
-   tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx) from ch_input_indels
-
-   output:
-   tuple sampID, file("${sampID}.indels.vcf.gz") into ch_vcf_indels
-
-   """
-   bcftools view -v indels  -f .,PASS $vcf -o ${sampID}.indels.vcf.gz -O z
-   """
-
- }
-
- process indelsToBed {
-
-   tag "$sampID"
-
-   input:
-   tuple sampID, file(vcf) from ch_vcf_indels
-
-   output:
-   set sampID, file("${sampID}.indels.bed") into ch_indels_bed
-
-   """
-   ## Decompress VCF on the fly. Add +/- 5 bp as recommended in MosaicHunter
-   awk  '{OFS = "\t"}!/^#/{print \$1, \$2 - 5, \$2 + (length(\$2)) + 5}' <(gzip -cd $vcf) > ${sampID}.indels.bed
-   """
-
- }
-
- process cnvsToBed {
-
-   tag "$sampID"
-
-   input:
-   tuple sampID, file(txt) from ch_cnvs_mosaichunter
-
-   output:
-   tuple sampID, file("${sampID}.cnvs.bed") into ch_cnvs_bed
-
-   """
-   cut -f2-4 $txt | tail -n +2 - > ${sampID}.cnvs.bed
-   """
-
- }
-
-ch_comb = ch_indels_bed.join(ch_cnvs_bed)
-
-process mergeBeds {
-
-  tag "$sampID"
-
-  input:
-  tuple sampID, file(indels), file(cnvs) from ch_comb
-
-  output:
-  tuple sampID, file("${sampID}.merged.bed") into ch_merged_bed
-
-  """
-  cp $indels ${sampID}.merged.bed
-  cat $cnvs >> ${sampID}.merged.bed
-  """
-
-}
-
-ch_input_mosaichunter_input = ch_input_mosaichunter.join(ch_sex_mosaics).join(ch_merged_bed)
-
-process runMosaicHunter {
-
-  tag "$sampID"
-  label 'process_medium'
-  publishDir "${params.outdir}/Mosaics/SNVs/TXT/unfilteredVariants/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
-  publishDir "${params.outdir}/Mosaics/SNVs/logs/runMosaicHunter/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
-
-  input:
-  tuple val(sampID), file(bam), file(bai), file(vcf), file(vcf_idx), val(sex), file(bed) from ch_input_mosaichunter_input
-  file(fasta) from ch_fasta_for_mosaichunter.collect()
-  file(conf) from mosaichunter_config
-  val(mode) from params.mosaichunter_mode
-  file(gapsRef) from gapsRef
-
-
-  output:
-  tuple sampID, file("final.passed.tsv") into ch_mosaichunter_out, ch_mosaichunter_out2
-  file("stdout*.log")
-
-  script:
-  """
-  java -jar /opt/MosaicHunter/build/mosaichunter.jar -C $conf \
-  -P input_file=$bam \
-  -P reference_file=$fasta \
-  -P output_dir=./ \
-  -P mosaic_filter.sex=$sex \
-  -P mosaic_filter.mode=$mode \
-  -P repetitive_region_filter.bed_file=$gapsRef \
-  -P indel_region_filter.bed_file=$bed
-  """
-
-}
-
-
-process mosaicHunterVCF {
+process CONVERT_MOSAICHUNTER_VCF {
 
   tag "$sampID"
 
@@ -716,127 +489,7 @@ else
   """
 }
 
-process indexVCF {
-
-  tag "$sampID"
-
-  input:
-  tuple sampID, file(vcf) from ch_mosaichunter_vcf
-
-  output:
-  tuple file(vcf), file("${vcf}.tbi") into ch_mosaichunter_tbi
-
-  script:
-  """
-  tabix -p vcf $vcf
-  """
-}
-
-
-process mergeVCFs {
-
-  input:
-  file(vcf) from ch_mosaichunter_tbi.collect()
-
-  output:
-  file("merged.MosaicHunter.MosaicSNVs.vcf.gz") into ch_mosaichunter_vcf_merge
-
-  script:
-  """
-  bcftools merge *.gz -m none -o merged.MosaicHunter.MosaicSNVs.vcf.gz -O z
-  """
-}
-
-process selectNonPrivateVariants {
-
-  input:
-  file(vcf) from ch_mosaichunter_vcf_merge
-
-  output:
-  file("nonprivate.MosaicHunter.MosaicSNVs.vcf.gz") into ch_mosaichunter_vcf_nonprivate
-
-  script:
-  """
-  bcftools view -i 'N_SAMPLES-N_MISSING>1'  $vcf -o nonprivate.MosaicHunter.MosaicSNVs.vcf.gz -O z
-  """
-}
-
-
-
-
-process convertAnnovarinput {
-
-  tag "$sampID"
-
-  input:
-  tuple sampID, file(tsv) from ch_mosaichunter_out
-
-  output:
-  tuple sampID, file("${sampID}.avinput.txt") into ch_mosaichunter_avinput
-
-  script:
-  """
-awk  '{OFS = "\t"}
-{if (\$3=\$7)
-      print \$1, \$2, \$2, \$3, \$9, \$10/\$4, \$4, \$8"/"\$10;
-else
-    print \$1, \$2,  \$2, \$3, \$7,  \$8/\$4, \$4, \$10"/"\$8;
-   }'    $tsv > ${sampID}.avinput.txt
-  """
-
-}
-
-process annotateSNPs {
-
-  tag "$sampID"
-
-  input:
-  tuple sampID, file(avinput) from ch_mosaichunter_avinput
-  file(annovar)
-  file(annovarVar)
-  file(annovarCod)
-  file(annovarXref)
-  file(annovarFold)
-
-  output:
-  tuple sampID, file("${sampID}.hg19_multianno.txt") into ch_mosaichunter_annot
-
-  script:
-  """
-  perl $annovar $avinput $annovarFold -buildver hg19 -out ${sampID} -remove \
-  --xref $annovarXref \
-  -protocol refGene,cytoBand,genomicSuperDups,gnomad211_exome,gnomad211_genome,avsnp150,kaviar_20150923,clinvar_20200316,dbnsfp41a \
-  -operation gx,r,r,f,f,f,f,f,f -nastring . --otherinfo
-  """
-}
-
-
-process prioritizeSNVs {
-
-  tag "$sampID"
-  publishDir "${params.outdir}/Mosaics/SNVs/XLSX/", pattern: '*.xlsx', mode: 'copy'
-  publishDir "${params.outdir}/Mosaics/SNVs/logs/prioritization/", pattern: '*.log', mode: 'copy'
-  publishDir "${params.outdir}/Mosaics/SNVs/TXT/filteredVariants/", pattern: '*.txt', mode: 'copy'
-
-  input:
-  tuple sampID, file(annovar) from ch_mosaichunter_annot
-  file(omim)
-  file(omim_map)
-  file(nonprivate) from ch_mosaichunter_vcf_nonprivate
-
-
-  output:
-  file("*.txt")
-  file("*.log")
-  file("*.xlsx")
-
-  script:
-  """
-  prioritizeSNVs.R $annovar $omim $omim_map $nonprivate ${sampID}.MosaicHunter.MosaicSNVs.Prioritization
-  """
-}
-
-
+*/
 
 // /*
 //  * STEP 3 - Output Description HTML
