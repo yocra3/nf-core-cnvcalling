@@ -647,6 +647,8 @@ process runMosaicHunter {
 
   tag "$sampID"
   label 'process_high'
+  label 'process_long'
+
   publishDir "${params.outdir}/Mosaics/SNVs/TXT/unfilteredVariants/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
   publishDir "${params.outdir}/Mosaics/SNVs/logs/runMosaicHunter/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
 
