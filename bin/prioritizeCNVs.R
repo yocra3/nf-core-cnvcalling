@@ -68,7 +68,8 @@ createReportTable <- function(filtTab, cnv){
   df$q0 <- geno(cnv.filt)$q0[, 1]
   df$Coordinates <- as.character(createGRfromVCF(cnv.filt))
   df$SVLEN <- width(GRanges(df$Coordinates))
-  df[, c("Coordinates", "ReadDepth", "E", "q0", selCols)]
+  df$CNVnator_coords <- geno(cnv.filt)$CNVN[, 1]
+  df[, c("Coordinates", "ReadDepth", "E", "q0", "CNVnator_coords", selCols)]
 }
 
 pathdf <- createReportTable(vars.path, cnv)

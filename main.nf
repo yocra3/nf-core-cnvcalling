@@ -488,13 +488,12 @@ echo "##fileformat=VCFv4.3
 ##FORMAT=<ID=q0,Number=1,Type=Float,Description='q0'>
 ##FORMAT=<ID=NCNV,Number=1,Type=Integer,Description='Number of CNVs'>
 ##FORMAT=<ID=LCNVS,Number=1,Type=Integer,Description='Length of CNVS'>
-##FORMAT=<ID=LG,Number=1,Type=Integer,Description='Length of gaps'>
-##FORMAT=<ID=PG,Number=1,Type=Float,Description='Proportion of Gaps'>
+##FORMAT=<ID=CNVN,Number=1,Type=String,Description='Coordinates in CNVnator'>
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t$sampID" > ${sampID}.CNVs.vcf
 
 ## Add calls
-tail -n +2 $merged | awk  '{OFS = "\t"}!/^#/{print \$2, \$3, ".", "N", ".", "<"\$5">", "PASS", "SVTYPE="\$5";END="\$4";SVLEN="\$6,\
-   "GT:NRD:E:q0:NCNV:LCNVS:LG:PG", "1/0:"\$7":"\$8":"\$9":"\$10":"\$11":"\$12":"\$13  }' - \
+tail -n +2 $merged | awk  '{OFS = "\t"}!/^#/{gsub(":",".",\$15);print \$2, \$3, ".", "N", ".", "<"\$5">", "PASS", "SVTYPE="\$5";END="\$4";SVLEN="\$6,\
+   "GT:NRD:E:q0:NCNV:LCNVS:CNVN", "1/0:"\$7":"\$8":"\$9":"\$10":"\$11":"\$15  }' - \
    >> ${sampID}.CNVs.vcf
    sed -i 's/:-/:\\./g' ${sampID}.CNVs.vcf ## Change empty values to .
    sed -i 's/\\x27/\\x22/g' ${sampID}.CNVs.vcf ## Change ' for "
@@ -647,7 +646,7 @@ ch_input_mosaichunter_input = ch_input_mosaichunter.join(ch_sex_mosaics).join(ch
 process runMosaicHunter {
 
   tag "$sampID"
-  label 'process_medium'
+  label 'process_high'
   publishDir "${params.outdir}/Mosaics/SNVs/TXT/unfilteredVariants/", pattern: '*.tsv', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.txt" }
   publishDir "${params.outdir}/Mosaics/SNVs/logs/runMosaicHunter/", pattern: '*.log', mode: 'copy', saveAs: { filename -> "${sampID}.MosaicHunter.MosaicSNVs.log" }
 
