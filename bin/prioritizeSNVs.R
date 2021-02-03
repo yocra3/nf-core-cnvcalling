@@ -10,7 +10,7 @@
 #' Select SNVs:
 #' - In exonic or splicing positions
 #' - Highly deleterous (frameshift, non-sense) or non-synonimous
-#' Generate Excel tables. For each source (but clinVar), two tables are generated: 
+#' Generate Excel tables. For each source (but clinVar), two tables are generated:
 #'     - Dominant model (Heterozygous variants)
 #'     - Recessive model (double heterozygous and homozygous)
 #' - clinVar: Variants indentified in clinVar as pathogenic or likely pathogenic
@@ -47,7 +47,7 @@ library(tidyverse)
 #### Consider Homozygous for AF > 0.8
 ini <- read_tsv(annovarFile, na = ".") %>%
   mutate(ID = paste0(Chr, ":", Start, "_", Ref, "/", Alt),
-         genotype = ifelse(Otherinfo1 == "0/1" | Otherinfo1 < 0.8,
+         genotype = ifelse(Otherinfo1 == "het" | Otherinfo1 < 0.8,
          "Heterozygous", "Homozygous")
 )
 
@@ -100,7 +100,7 @@ omim_match <- read_tsv(omimMap) %>%
 omim <- read_tsv(omimGenes, skip = 3) %>%
   mutate(OMIM_ID = as.character(`MIM Number`),
          OMIM_Phenotype = Phenotypes) %>%
-  dplyr::select(OMIM_ID, OMIM_Phenotype) %>% 
+  dplyr::select(OMIM_ID, OMIM_Phenotype) %>%
   filter(!is.na(OMIM_ID) & !is.na(OMIM_Phenotype)) %>%
   inner_join(omim_match, by = "OMIM_ID")
 
@@ -110,7 +110,7 @@ vars.annot <- left_join(ini.del, omim, by = "Gene.refGene") %>%
          misZ_flag = !is.na(pRec.refGene) & pRec.refGene > min_pREC,
          cand_flag = pLI_flag | misZ_flag,
          clinVar_flag = !is.na(CLNSIG) & grepl("Pathogenic|Likely_pathogenic", CLNSIG),
-         prior_tab = ifelse(clinVar_flag, "clinVar", 
+         prior_tab = ifelse(clinVar_flag, "clinVar",
                             ifelse(!is.na(OMIM_Phenotype), "OMIM",
                                    ifelse(cand_flag, "Candidate genes", "Other genes"))))
 
@@ -120,7 +120,7 @@ ini.omim <- filter(vars.annot, prior_tab == "OMIM")
 
 ## Variants per gene
 getGenesMultiVariants <- function(df, n = 2){
-  df %>% 
+  df %>%
     dplyr::select(Gene.refGene) %>%
     group_by(Gene.refGene) %>%
     summarize(count = n()) %>%
@@ -171,7 +171,7 @@ write.table(sumTable, file = paste0(outPrefix, ".log"), quote = FALSE,
             row.names = FALSE)
 
 
-write.xlsx(list(clinvar, omim.dom, omim.rec, cand.dom, cand.rec, 
+write.xlsx(list(clinvar, omim.dom, omim.rec, cand.dom, cand.rec,
                 rest.dom, rest.rec, sumTable),
            file = paste0(outPrefix, ".xlsx"),
            rowNames = FALSE,

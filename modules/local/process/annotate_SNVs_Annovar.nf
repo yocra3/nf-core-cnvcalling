@@ -5,6 +5,7 @@
 process ANNOTATE_SNVS_ANNOVAR {
 
   tag "$sampID"
+  cpus 16
 
   input:
   tuple val(sampID), file(avinput)
@@ -15,13 +16,13 @@ process ANNOTATE_SNVS_ANNOVAR {
   file(annovarFold)
 
   output:
-  tuple val(sampID), file("${sampID}.hg19_multianno.txt") 
+  tuple val(sampID), file("${sampID}.hg19_multianno.txt")
 
   script:
   """
   perl $annovar $avinput $annovarFold -buildver hg19 -out ${sampID} -remove \
   --xref $annovarXref \
   -protocol refGene,cytoBand,genomicSuperDups,gnomad211_exome,gnomad211_genome,avsnp150,kaviar_20150923,clinvar_20200316,dbnsfp41a \
-  -operation gx,r,r,f,f,f,f,f,f -nastring . --otherinfo
+  -operation gx,r,r,f,f,f,f,f,f -nastring . --otherinfo --thread ${task.cpus}
   """
 }
