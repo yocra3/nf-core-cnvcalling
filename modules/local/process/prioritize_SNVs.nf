@@ -4,9 +4,9 @@
 process PRIORITIZE_SNVS {
 
   tag "$sampID"
-  publishDir "${params.outdir}/Mosaics/SNVs/XLSX/", pattern: '*.xlsx', mode: 'copy'
-  publishDir "${params.outdir}/Mosaics/SNVs/logs/prioritization/", pattern: '*.log', mode: 'copy'
-  publishDir "${params.outdir}/Mosaics/SNVs/TXT/filteredVariants/", pattern: '*.txt', mode: 'copy'
+  publishDir "${params.outdir}/SNVs/XLSX/", pattern: '*.xlsx', mode: 'copy'
+  publishDir "${params.outdir}/SNVs/logs/prioritization/", pattern: '*.log', mode: 'copy'
+  publishDir "${params.outdir}/SNVs/TXT/filteredVariants/", pattern: '*.txt', mode: 'copy'
 
   input:
   tuple val(sampID), file(annovar)
