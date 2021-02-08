@@ -6,6 +6,7 @@ process ANNOTATE_SNVS_ANNOVAR {
 
   tag "$sampID"
   label 'process_long'
+  label 'process_medium'
   cpus 16
 
   input:

@@ -51,6 +51,7 @@ include { VCF_TO_ANNOVAR } from './modules/local/process/VCF_to_annovar.nf'
 include { ANNOTATE_SNVS_ANNOVAR } from './modules/local/process/annotate_SNVs_Annovar.nf'
 include { PRIORITIZE_SNVS } from './modules/local/process/prioritize_SNVs.nf'
 include { TABIX_INDEX_VCF } from './modules/local/process/tabix_index_vcf.nf'
+include { BGZIP_COMPRESS_VCF } from './modules/local/process/bgzip_compress_vcf.nf'
 
 
 
@@ -91,7 +92,6 @@ workflow FILTER_SNVS {
   TABIX_INDEX_VCF(BCFTOOLS_LEFT_NORMALIZE.out)
   BCFTOOLS_MERGE_VCFS(TABIX_INDEX_VCF.out.collect())
   SELECT_NONPRIVATE_VARIANTS(BCFTOOLS_MERGE_VCFS.out)
-
 
   VCF_TO_ANNOVAR(BCFTOOLS_LEFT_NORMALIZE.out, annovarConv)
   ANNOTATE_SNVS_ANNOVAR(VCF_TO_ANNOVAR.out, annovar, annovarVar, annovarCod, annovarXref, annovarFold)

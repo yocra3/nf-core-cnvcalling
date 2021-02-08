@@ -3,6 +3,9 @@
 */
 process PRIORITIZE_SNVS {
 
+  label 'process_long'
+  label 'process_medium'
+
   tag "$sampID"
   publishDir "${params.outdir}/SNVs/XLSX/", pattern: '*.xlsx', mode: 'copy'
   publishDir "${params.outdir}/SNVs/logs/prioritization/", pattern: '*.log', mode: 'copy'

@@ -7,10 +7,10 @@ process SELECT_NONPRIVATE_VARIANTS {
   file(vcf)
 
   output:
-  file("nonprivate.variants.vcf.gz") 
+  file("nonprivate.variants.vcf.gz")
 
   script:
   """
-  bcftools view -i 'N_SAMPLES-N_MISSING>1'  $vcf -o nonprivate.variants.vcf.gz -O z
+  bcftools annotate -x  ^FORMAT/GT -i 'N_SAMPLES-N_MISSING>1'  $vcf -o nonprivate.variants.vcf.gz -O z
   """
 }
