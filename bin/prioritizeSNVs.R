@@ -82,12 +82,6 @@ ini.exon <- filter(ini.com, Func.refGene %in% c("exonic", "splicing"))
 ## Discard synonymous variants
 ini.del <- filter(ini.exon, !( !is.na(ExonicFunc.refGene) & ExonicFunc.refGene %in% c("synonymous SNV", "unknown")))
 
-## Create table for ORVAL
-orval <- ini.del %>%
-  select(Chr, Start, Ref, Alt, genotype)
-
-write.table(orval, file = paste0(outPrefix, ".selVariants.txt"), quote = FALSE,
-  row.names = FALSE)
 
 
 
@@ -113,6 +107,18 @@ vars.annot <- left_join(ini.del, omim, by = "Gene.refGene") %>%
          prior_tab = ifelse(clinVar_flag, "clinVar",
                             ifelse(!is.na(OMIM_Phenotype), "OMIM",
                                    ifelse(cand_flag, "Candidate genes", "Other genes"))))
+
+
+## Create table for ORVAL
+orval <- vars.annot %>%
+  filter(prior_tab != "Other genes")
+  select(Chr, Start, Ref, Alt, genotype) %>%
+  mutate(Chr = as.character(Chr),
+         Chr = ifelse(is.na(Chr), "X", Chr))
+
+write.table(orval, file = paste0(outPrefix, ".selVariants.txt"), quote = FALSE,
+row.names = FALSE)
+
 
 # clinVar table ####
 clinvar <- filter(vars.annot, prior_tab == "clinVar")
