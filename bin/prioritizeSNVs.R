@@ -111,7 +111,7 @@ vars.annot <- left_join(ini.del, omim, by = "Gene.refGene") %>%
 
 ## Create table for ORVAL
 orval <- vars.annot %>%
-  filter(prior_tab != "Other genes")
+  filter(prior_tab != "Other genes") %>%
   select(Chr, Start, Ref, Alt, genotype) %>%
   mutate(Chr = as.character(Chr),
          Chr = ifelse(is.na(Chr), "X", Chr))
