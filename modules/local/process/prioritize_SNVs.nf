@@ -25,6 +25,6 @@ process PRIORITIZE_SNVS {
 
   script:
   """
-  prioritizeSNVs.R $annovar $omim $omim_map $nonprivate ${sampID}.MosaicHunter.MosaicSNVs.Prioritization
+  prioritizeSNVs.R $annovar $omim $omim_map $nonprivate ${sampID}.Strelka.GerminalSNVs.Prioritization
   """
 }

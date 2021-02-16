@@ -10,6 +10,7 @@
 #' Select SNVs:
 #' - In exonic or splicing positions
 #' - Highly deleterous (frameshift, non-sense) or non-synonimous
+#' - For missense, high impact (CADD > 25)
 #' Generate Excel tables. For each source (but clinVar), two tables are generated:
 #'     - Dominant model (Heterozygous variants)
 #'     - Recessive model (double heterozygous and homozygous)
@@ -30,11 +31,12 @@ cohortVCF <- args[4]
 outPrefix <- args[5]
 
 ### Parameters (move to a config file?)
-AF_threshold <- 0.001
+AF_threshold <- 0.002
 min_readDepth <- 10
 max_internal_freq <- 2
 min_pLI <- 0.8
 min_pREC <- 0.8
+min_CADD <- 25
 
 # Load libraries
 library(VariantAnnotation)
@@ -79,11 +81,9 @@ ini.com <- ini.depth %>%
 ## Select exonic or splicing Variants
 ini.exon <- filter(ini.com, Func.refGene %in% c("exonic", "splicing"))
 
-## Discard synonymous variants
-ini.del <- filter(ini.exon, !( !is.na(ExonicFunc.refGene) & ExonicFunc.refGene %in% c("synonymous SNV", "unknown")))
-
-
-
+## Discard synonymous variants and  non-synonymous variants with low CADD
+ini.del <- filter(ini.exon, !( !is.na(ExonicFunc.refGene) & ExonicFunc.refGene %in% c("synonymous SNV", "unknown"))) %>%
+            filter(!(ExonicFunc.refGene == "nonsynonymous SNV" & (is.na(CADD_phred) | CADD_phred < min_CADD)))
 
 # OMIM ####
 ## Create table with annovar gene ID, OMIM ID and OMIM phenotype
