@@ -9,6 +9,8 @@ process ANNOTATE_SNVS_ANNOVAR {
   label 'process_medium'
   cpus 16
 
+  publishDir "${params.outdir}/SNVs/Annovar/", pattern: '*.txt', mode: 'copy'
+
   input:
   tuple val(sampID), file(avinput)
   file(annovar)
